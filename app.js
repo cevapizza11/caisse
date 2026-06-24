@@ -948,7 +948,7 @@ function renderEcranReglages() {
       <div class="helper-text">En dessous de 0,50 € l'écart est toujours considéré comme "juste" (arrondis de caisse).</div>
     </div>
 
-    <button class="btn btn-primary" onclick="Reglages.enregistrer()">💾 Enregistrer les réglages</button>
+    <div class="helper-text" style="text-align:center; margin-top:4px;">✓ Toutes les modifications sont enregistrées automatiquement</div>
 
     <div class="divider-text">À propos</div>
     <div class="card" style="text-align:center;">
@@ -967,21 +967,25 @@ const Reglages = {
     if (!nom || !nom.trim()) return;
     State[type].push(nom.trim());
     Render.screen();
+    Sync.sauvegarderConfig();
   },
   modifierItem(type, index, value) {
     if (!value.trim()) { toast("Le nom ne peut pas être vide", true); Render.screen(); return; }
     State[type][index] = value.trim();
     Render.screen();
+    Sync.sauvegarderConfig();
   },
   supprimerItem(type, index) {
     if (State[type].length <= 1) { toast("Il doit rester au moins un élément", true); return; }
     if (!confirm("Supprimer cet élément ?")) return;
     State[type].splice(index, 1);
     Render.screen();
+    Sync.sauvegarderConfig();
   },
   setSeuil(value) {
     const v = parseFloat(value);
     State.seuilEcartAlerte = isNaN(v) ? 5 : Math.max(0, v);
+    Sync.sauvegarderConfig();
   },
 
   ajouterEmploye() {
@@ -1000,8 +1004,9 @@ const Reglages = {
     // (plus robuste que de tester juste "premier employé créé")
     const aucunAdmin = !State.employes.some(e => e.admin === true);
     State.employes.push({ nom: nom.trim(), pin: pin, admin: aucunAdmin });
-    if (aucunAdmin) toast(nom.trim() + " est administrateur par défaut (aucun admin existant)");
     Render.screen();
+    Sync.sauvegarderEmployes();
+    toast(aucunAdmin ? nom.trim() + " ajouté (administrateur par défaut)" : nom.trim() + " ajouté et enregistré");
   },
 
   modifierEmploye(index, champ, value) {
@@ -1017,6 +1022,7 @@ const Reglages = {
       State.employes[index].pin = value;
     }
     Render.screen();
+    Sync.sauvegarderEmployes();
   },
 
   supprimerEmploye(index) {
@@ -1028,6 +1034,7 @@ const Reglages = {
     if (!confirm("Supprimer cet employé ?")) return;
     State.employes.splice(index, 1);
     Render.screen();
+    Sync.sauvegarderEmployes();
   },
 
   toggleAdmin(index) {
@@ -1037,14 +1044,9 @@ const Reglages = {
       return;
     }
     emp.admin = !emp.admin;
+    Render.screen();
+    Sync.sauvegarderEmployes();
     toast(emp.admin ? emp.nom + " est maintenant administrateur" : emp.nom + " n'est plus administrateur");
-    Render.screen();
-  },
-
-  async enregistrer() {
-    await Sync.sauvegarderConfig();
-    await Sync.sauvegarderEmployes();
-    Render.screen();
   }
 };
 
