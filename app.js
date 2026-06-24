@@ -16,6 +16,7 @@ const firebaseConfig = {
   messagingSenderId: "33627481275",
   appId: "1:33627481275:web:38dbab3f2f61c5cadcb59e"
 };
+
 let db = null;
 let firebaseReady = false;
 
@@ -32,6 +33,7 @@ try {
 
 const COLLECTION = "comptages";
 const CAISSES_DOC = "config/caisses";
+const EMPLOYES_DOC = "config/employes";
 
 /* ================================================================
    SECTION 2 — DÉNOMINATIONS (billets / pièces EUR)
@@ -66,12 +68,16 @@ const State = {
   currentScreen: 'nouveau',
   caisses: ["Caisse 1", "Caisse 2", "Bar"],
   services: ["Service midi", "Service soir", "Journée complète"],
+  employes: [],         // [{nom, pin}] chargés depuis Firestore
+  employeActif: null,   // {nom} de la personne connectée sur cet appareil
   comptages: [],       // chargés depuis Firestore
   historyFilter: { caisse: 'toutes', periode: '30j' },
   draft: null,         // comptage en cours de saisie
   editingHistId: null,
   seuilEcartAlerte: 5  // € — au-delà, écart affiché en rouge
 };
+
+const SESSION_KEY = 'caisseMarmiteEmployeActif';
 
 function nouveauDraft() {
   const denomQte = {};
@@ -84,6 +90,7 @@ function nouveauDraft() {
     caisse: State.caisses[0] || "Caisse 1",
     service: State.services[0] || "Service midi",
     type: "cloture",       // 'fond' (ouverture) ou 'cloture' (fermeture)
+    employe: State.employeActif ? State.employeActif.nom : "",
     denomQte: denomQte,
     caTheorique: null,     // saisi manuellement, ou null si pas de rapprochement
     fondDeCaisse: 0,       // montant de départ en caisse, pour calcul écart sur clôture
@@ -141,6 +148,143 @@ const Nav = {
 };
 
 /* ================================================================
+   SECTION 7B — AUTHENTIFICATION PAR PIN EMPLOYÉ
+   ================================================================ */
+const Auth = {
+  pinSaisi: "",
+
+  restaurerSession() {
+    try {
+      const nom = localStorage.getItem(SESSION_KEY);
+      if (nom && State.employes.find(e => e.nom === nom)) {
+        State.employeActif = { nom };
+        return true;
+      }
+    } catch (e) { /* localStorage indisponible, on ignore */ }
+    return false;
+  },
+
+  ouvrirEcranConnexion() {
+    this.pinSaisi = "";
+    document.getElementById('screen').style.display = 'none';
+    document.querySelector('.bottom-nav').style.display = 'none';
+    document.getElementById('loginScreen').style.display = 'flex';
+    this.renderLogin();
+  },
+
+  fermerEcranConnexion() {
+    document.getElementById('loginScreen').style.display = 'none';
+    document.getElementById('screen').style.display = '';
+    document.querySelector('.bottom-nav').style.display = '';
+  },
+
+  choisirEmploye(nom) {
+    this.employeChoisi = nom;
+    this.pinSaisi = "";
+    this.renderLogin();
+  },
+
+  retourListe() {
+    this.employeChoisi = null;
+    this.pinSaisi = "";
+    this.renderLogin();
+  },
+
+  saisirChiffre(c) {
+    if (this.pinSaisi.length >= 4) return;
+    this.pinSaisi += c;
+    this.renderLogin();
+    if (this.pinSaisi.length === 4) {
+      setTimeout(() => this.verifierPin(), 150);
+    }
+  },
+
+  effacerChiffre() {
+    this.pinSaisi = this.pinSaisi.slice(0, -1);
+    this.renderLogin();
+  },
+
+  verifierPin() {
+    const emp = State.employes.find(e => e.nom === this.employeChoisi);
+    if (emp && emp.pin === this.pinSaisi) {
+      State.employeActif = { nom: emp.nom };
+      try { localStorage.setItem(SESSION_KEY, emp.nom); } catch(e) {}
+      this.employeChoisi = null;
+      this.pinSaisi = "";
+      this.fermerEcranConnexion();
+      State.draft = nouveauDraft();
+      Render.screen();
+    } else {
+      toast("Code incorrect", true);
+      this.pinSaisi = "";
+      this.renderLogin();
+    }
+  },
+
+  changerUtilisateur() {
+    State.employeActif = null;
+    try { localStorage.removeItem(SESSION_KEY); } catch(e) {}
+    this.employeChoisi = null;
+    this.ouvrirEcranConnexion();
+  },
+
+  renderLogin() {
+    const el = document.getElementById('loginScreen');
+    if (!el) return;
+
+    if (State.employes.length === 0) {
+      el.innerHTML = `
+        <div class="login-box">
+          <div class="login-logo">🦪</div>
+          <h2 style="color:#fff; margin-bottom:6px;">Comptage Caisse</h2>
+          <p style="color:#bcd6d4; font-size:13px; margin-bottom:20px;">
+            Aucun employé n'est encore configuré.<br>Ajoute-en au moins un dans Réglages.
+          </p>
+          <button class="btn btn-primary" onclick="Auth.accesSansCompte()">Continuer sans code (réglages)</button>
+        </div>`;
+      return;
+    }
+
+    if (!this.employeChoisi) {
+      const boutons = State.employes.map(e => `
+        <button class="login-employe-btn" onclick="Auth.choisirEmploye('${e.nom.replace(/'/g,"\\'")}')">${e.nom}</button>
+      `).join('');
+      el.innerHTML = `
+        <div class="login-box">
+          <div class="login-logo">🦪</div>
+          <h2 style="color:#fff; margin-bottom:18px;">Qui es-tu ?</h2>
+          <div class="login-employe-list">${boutons}</div>
+        </div>`;
+      return;
+    }
+
+    const dots = [0,1,2,3].map(i => `<div class="pin-dot ${i < this.pinSaisi.length ? 'filled' : ''}"></div>`).join('');
+    const pad = ['1','2','3','4','5','6','7','8','9','','0','⌫'].map(k => {
+      if (k === '') return `<div></div>`;
+      if (k === '⌫') return `<button class="pin-key pin-key-action" onclick="Auth.effacerChiffre()">⌫</button>`;
+      return `<button class="pin-key" onclick="Auth.saisirChiffre('${k}')">${k}</button>`;
+    }).join('');
+
+    el.innerHTML = `
+      <div class="login-box">
+        <div class="login-logo">🦪</div>
+        <h2 style="color:#fff; margin-bottom:4px;">${this.employeChoisi}</h2>
+        <p style="color:#bcd6d4; font-size:13px; margin-bottom:18px;">Entre ton code à 4 chiffres</p>
+        <div class="pin-dots">${dots}</div>
+        <div class="pin-pad">${pad}</div>
+        <button class="link-btn-light" onclick="Auth.retourListe()">← Changer de personne</button>
+      </div>`;
+  },
+
+  accesSansCompte() {
+    State.employeActif = { nom: "Non renseigné" };
+    this.fermerEcranConnexion();
+    State.draft = nouveauDraft();
+    Render.screen();
+  }
+};
+
+/* ================================================================
    SECTION 5 — TOAST (notifications courtes)
    ================================================================ */
 let toastTimer = null;
@@ -191,6 +335,7 @@ const Sync = {
         caisse: draft.caisse,
         service: draft.service,
         type: draft.type,
+        employe: draft.employe || "Non renseigné",
         denomQte: draft.denomQte,
         caTheorique: draft.caTheorique === "" ? null : draft.caTheorique,
         fondDeCaisse: parseFloat(draft.fondDeCaisse) || 0,
@@ -241,6 +386,29 @@ const Sync = {
       }
     } catch (e) {
       console.error("Erreur chargement config :", e);
+    }
+  },
+
+  async chargerEmployes() {
+    if (!firebaseReady) return;
+    try {
+      const doc = await db.doc(EMPLOYES_DOC).get();
+      if (doc.exists) {
+        const data = doc.data();
+        if (data.liste && data.liste.length) State.employes = data.liste;
+      }
+    } catch (e) {
+      console.error("Erreur chargement employés :", e);
+    }
+  },
+
+  async sauvegarderEmployes() {
+    if (!firebaseReady) { toast("Pas de connexion — employés non sauvegardés", true); return; }
+    try {
+      await db.doc(EMPLOYES_DOC).set({ liste: State.employes });
+    } catch (e) {
+      console.error("Erreur sauvegarde employés :", e);
+      toast("Erreur lors de l'enregistrement", true);
     }
   },
 
@@ -490,7 +658,7 @@ function renderEcranHistorique() {
       <div class="hist-item" onclick="Hist.ouvrirDetail('${c.id}')">
         <div class="hist-main">
           <div class="hist-titre">${c.caisse} · ${c.type === 'fond' ? 'Ouverture' : 'Clôture'}</div>
-          <div class="hist-meta">${formatDate(c.date)} à ${c.heure} · ${c.service}</div>
+          <div class="hist-meta">${formatDate(c.date)} à ${c.heure} · ${c.service}${c.employe ? ' · ' + c.employe : ''}</div>
         </div>
         <div class="hist-right">
           <div class="hist-montant">${formatMontant(c.total)}</div>
@@ -502,6 +670,7 @@ function renderEcranHistorique() {
   return `
     <div class="filter-bar">${chipsHtml}</div>
     <div class="filter-bar">${chipsPeriode}</div>
+    <button class="btn btn-secondary" style="margin-bottom:14px;" onclick="Export.exporterExcel()">📊 Exporter en Excel (${list.length} comptage${list.length>1?'s':''})</button>
     ${items}
   `;
 }
@@ -534,6 +703,7 @@ const Hist = {
       caisse: c.caisse,
       service: c.service,
       type: c.type,
+      employe: c.employe || (State.employeActif ? State.employeActif.nom : ""),
       denomQte: c.denomQte ? { ...c.denomQte } : nouveauDraft().denomQte,
       caTheorique: c.caTheorique,
       fondDeCaisse: c.fondDeCaisse || 0,
@@ -576,7 +746,7 @@ function renderDetailModal() {
     <div class="modal-sheet">
       <div class="modal-handle"></div>
       <div class="modal-title">${c.caisse} — ${c.type === 'fond' ? 'Ouverture' : 'Clôture'}</div>
-      <div class="hist-meta" style="margin-bottom:14px;">${formatDateHeure(c.createdAt || Date.now())} · ${c.service}</div>
+      <div class="hist-meta" style="margin-bottom:14px;">${formatDateHeure(c.createdAt || Date.now())} · ${c.service}${c.employe ? ' · compté par ' + c.employe : ''}</div>
 
       ${lignesBillets ? `<div class="denom-section-label">Billets</div>${lignesBillets}` : ''}
       ${lignesPieces ? `<div class="denom-section-label">Pièces</div>${lignesPieces}` : ''}
@@ -594,7 +764,9 @@ function renderDetailModal() {
 
       ${c.commentaire ? `<div class="card" style="margin-top:14px;"><label>Commentaire</label><div>${c.commentaire}</div></div>` : ''}
 
-      <div class="btn-full-row" style="margin-top:16px;">
+      <button class="btn btn-primary" style="margin-top:14px;" onclick="Export.exporterPdf('${c.id}')">🧾 Générer l'état de caisse (PDF)</button>
+
+      <div class="btn-full-row" style="margin-top:10px;">
         <button class="btn btn-secondary" onclick="Hist.chargerPourEditionParId('${c.id}')">✏️ Modifier</button>
         <button class="btn btn-danger" onclick="Hist.supprimer('${c.id}')">🗑️ Supprimer</button>
       </div>
@@ -698,8 +870,34 @@ function renderListeEditable(liste, type) {
   `).join('');
 }
 
+function renderListeEmployes() {
+  if (State.employes.length === 0) {
+    return `<div class="helper-text" style="margin-bottom:10px;">Aucun employé configuré — l'app sera accessible sans code.</div>`;
+  }
+  return State.employes.map((e, i) => `
+    <div class="denom-row" style="padding:6px 0;">
+      <input type="text" value="${e.nom}" placeholder="Nom" style="margin-bottom:0; flex:2;" onchange="Reglages.modifierEmploye(${i}, 'nom', this.value)">
+      <input type="text" inputmode="numeric" maxlength="4" value="${e.pin}" placeholder="PIN" style="margin-bottom:0; flex:1; text-align:center;" onchange="Reglages.modifierEmploye(${i}, 'pin', this.value)">
+      <button class="btn-icon" style="background:var(--ivoire-dark); color:var(--ecart-bad); margin-left:8px;" onclick="Reglages.supprimerEmploye(${i})">✕</button>
+    </div>
+  `).join('');
+}
+
 function renderEcranReglages() {
   return `
+    <div class="card">
+      <div class="card-title">Session</div>
+      <div class="helper-text" style="margin-bottom:10px;">Connecté en tant que <strong>${State.employeActif ? State.employeActif.nom : 'inconnu'}</strong></div>
+      <button class="btn btn-ghost" onclick="Auth.changerUtilisateur()">🔄 Changer d'utilisateur</button>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Employés &amp; codes PIN</div>
+      ${renderListeEmployes()}
+      <button class="btn btn-secondary" style="margin-top:8px;" onclick="Reglages.ajouterEmploye()">➕ Ajouter un employé</button>
+      <div class="helper-text" style="margin-top:8px; margin-bottom:0;">Le code PIN doit faire 4 chiffres. Chaque comptage enregistré est associé à l'employé connecté.</div>
+    </div>
+
     <div class="card">
       <div class="card-title">Caisses / postes</div>
       ${renderListeEditable(State.caisses, 'caisses')}
@@ -755,9 +953,161 @@ const Reglages = {
     const v = parseFloat(value);
     State.seuilEcartAlerte = isNaN(v) ? 5 : Math.max(0, v);
   },
+
+  ajouterEmploye() {
+    const nom = prompt("Prénom de l'employé :");
+    if (!nom || !nom.trim()) return;
+    if (State.employes.find(e => e.nom.toLowerCase() === nom.trim().toLowerCase())) {
+      toast("Ce nom existe déjà", true);
+      return;
+    }
+    let pin = prompt("Code PIN à 4 chiffres :");
+    if (!pin || !/^\d{4}$/.test(pin)) {
+      toast("Le PIN doit être composé de 4 chiffres", true);
+      return;
+    }
+    State.employes.push({ nom: nom.trim(), pin: pin });
+    Render.screen();
+  },
+
+  modifierEmploye(index, champ, value) {
+    if (champ === 'nom') {
+      if (!value.trim()) { toast("Le nom ne peut pas être vide", true); Render.screen(); return; }
+      State.employes[index].nom = value.trim();
+    } else if (champ === 'pin') {
+      if (!/^\d{4}$/.test(value)) {
+        toast("Le PIN doit être composé de 4 chiffres", true);
+        Render.screen();
+        return;
+      }
+      State.employes[index].pin = value;
+    }
+    Render.screen();
+  },
+
+  supprimerEmploye(index) {
+    if (!confirm("Supprimer cet employé ?")) return;
+    State.employes.splice(index, 1);
+    Render.screen();
+  },
+
   async enregistrer() {
     await Sync.sauvegarderConfig();
+    await Sync.sauvegarderEmployes();
     Render.screen();
+  }
+};
+
+/* ================================================================
+   SECTION 12B — EXPORT EXCEL & PDF
+   ================================================================ */
+const Export = {
+  exporterExcel() {
+    const list = comptagesFiltres();
+    if (list.length === 0) { toast("Rien à exporter pour ces filtres", true); return; }
+    if (typeof XLSX === 'undefined') { toast("Module Excel indisponible (vérifie ta connexion)", true); return; }
+
+    const rows = list.map(c => ({
+      "Date": formatDate(c.date),
+      "Heure": c.heure || "",
+      "Caisse": c.caisse,
+      "Type": c.type === 'fond' ? 'Ouverture' : 'Clôture',
+      "Service": c.service,
+      "Compté par": c.employe || "",
+      "Fond de caisse (€)": c.fondDeCaisse || 0,
+      "CA théorique (€)": c.caTheorique === null || c.caTheorique === undefined ? "" : c.caTheorique,
+      "Total compté (€)": c.total,
+      "Écart (€)": c.ecart === null || c.ecart === undefined ? "" : c.ecart,
+      "Commentaire": c.commentaire || ""
+    }));
+
+    const ws = XLSX.utils.json_to_sheet(rows);
+    ws['!cols'] = [
+      {wch:11},{wch:7},{wch:14},{wch:10},{wch:16},{wch:16},
+      {wch:16},{wch:15},{wch:15},{wch:10},{wch:30}
+    ];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Comptages");
+
+    const dateStr = new Date().toISOString().slice(0,10);
+    XLSX.writeFile(wb, `comptages-marmite-bleue-${dateStr}.xlsx`);
+    toast("Export Excel généré");
+  },
+
+  exporterPdf(id) {
+    const c = State.comptages.find(x => x.id === id);
+    if (!c) { toast("Comptage introuvable", true); return; }
+    const denomQte = c.denomQte || {};
+    const statut = statutEcart(c.ecart, State.seuilEcartAlerte);
+
+    const ligneDenom = (label, q, montant) => `
+      <tr>
+        <td>${label}</td>
+        <td style="text-align:center;">${q}</td>
+        <td style="text-align:right;">${formatMontant(montant)}</td>
+      </tr>`;
+
+    const lignesBillets = BILLETS.filter(b => (denomQte['b'+b]||0) > 0)
+      .map(b => ligneDenom(b + ' €', denomQte['b'+b], denomQte['b'+b]*b)).join('');
+    const lignesPieces = PIECES.filter(p => (denomQte['p'+p]||0) > 0)
+      .map(p => ligneDenom(p >= 1 ? p+' €' : (p*100).toFixed(0)+' cts', denomQte['p'+p], denomQte['p'+p]*p)).join('');
+
+    const ecartHtml = (c.ecart !== null && c.ecart !== undefined) ? `
+      <table class="pdf-table" style="margin-top:14px;">
+        <tr><td>Fond de caisse de départ</td><td style="text-align:right;">${formatMontant(c.fondDeCaisse||0)}</td></tr>
+        <tr><td>CA théorique (relevé)</td><td style="text-align:right;">${formatMontant(c.caTheorique||0)}</td></tr>
+        <tr style="font-weight:700;"><td>Total attendu</td><td style="text-align:right;">${formatMontant((c.fondDeCaisse||0)+(c.caTheorique||0))}</td></tr>
+        <tr style="font-weight:700; color:${statut==='ok'?'#2d7d4f':statut==='warn'?'#c19a2e':'#b6402f'};">
+          <td>ÉCART</td><td style="text-align:right;">${formatMontantSigne(c.ecart)}</td>
+        </tr>
+      </table>` : '';
+
+    const commentaireHtml = c.commentaire ? `
+      <div style="margin-top:16px; padding:12px; background:#f7f2ea; border-radius:8px; font-size:13px;">
+        <strong>Commentaire :</strong> ${c.commentaire}
+      </div>` : '';
+
+    const win = window.open('', '_blank');
+    win.document.write(`
+      <!DOCTYPE html>
+      <html lang="fr">
+      <head>
+      <meta charset="UTF-8">
+      <title>État de caisse — ${c.caisse} — ${formatDate(c.date)}</title>
+      <style>
+        body{font-family:Georgia,'Times New Roman',serif; color:#2A2521; padding:40px; max-width:600px; margin:0 auto;}
+        h1{font-size:22px; margin-bottom:2px; color:#163f3e;}
+        .sub{color:#6b6258; font-size:13px; margin-bottom:24px;}
+        table.pdf-table{width:100%; border-collapse:collapse; margin-bottom:8px;}
+        table.pdf-table td{padding:6px 4px; border-bottom:1px solid #e2d9c8; font-size:13.5px;}
+        .section-title{font-size:12px; text-transform:uppercase; letter-spacing:.6px; font-weight:700; color:#1F5C5A; margin:18px 0 6px; border-bottom:2px solid #1F5C5A; padding-bottom:4px;}
+        .total-row{display:flex; justify-content:space-between; padding:12px 0; border-top:2px solid #163f3e; border-bottom:2px solid #163f3e; font-weight:700; font-size:17px; margin-top:10px;}
+        .meta{display:flex; justify-content:space-between; font-size:12.5px; color:#6b6258; margin-top:30px; border-top:1px solid #e2d9c8; padding-top:10px;}
+        @media print{ body{padding:15mm;} }
+      </style>
+      </head>
+      <body>
+        <h1>🦪 La Marmite Bleue — État de caisse</h1>
+        <div class="sub">${c.caisse} · ${c.type === 'fond' ? 'Ouverture' : 'Clôture'} · ${formatDateHeure(c.createdAt || Date.now())} · ${c.service}${c.employe ? ' · Compté par ' + c.employe : ''}</div>
+
+        ${lignesBillets ? `<div class="section-title">Billets</div><table class="pdf-table">${lignesBillets}</table>` : ''}
+        ${lignesPieces ? `<div class="section-title">Pièces</div><table class="pdf-table">${lignesPieces}</table>` : ''}
+
+        <div class="total-row"><span>TOTAL COMPTÉ</span><span>${formatMontant(c.total)}</span></div>
+
+        ${ecartHtml}
+        ${commentaireHtml}
+
+        <div class="meta">
+          <span>Document généré le ${formatDateHeure(Date.now())}</span>
+          <span>La Marmite Bleue</span>
+        </div>
+
+        <script>window.onload = function(){ window.print(); };</script>
+      </body>
+      </html>
+    `);
+    win.document.close();
   }
 };
 
@@ -779,12 +1129,17 @@ const Render = {
 
     const sub = document.getElementById('topbarSub');
     if (sub) {
-      sub.textContent = {
+      const titreEcran = {
         nouveau: 'Nouveau comptage',
         historique: 'Historique des comptages',
         stats: "Statistiques d'écarts",
         reglages: 'Réglages'
       }[State.currentScreen] || 'La Marmite Bleue';
+      sub.textContent = titreEcran;
+    }
+    const userBtn = document.getElementById('userPill');
+    if (userBtn) {
+      userBtn.textContent = State.employeActif ? '👤 ' + State.employeActif.nom : '👤 ?';
     }
   }
 };
@@ -799,12 +1154,21 @@ async function initApp() {
   // Affiche l'écran de saisie immédiatement (utilisable hors-ligne)
   Render.screen();
 
-  // Charge la config et l'historique en arrière-plan
+  // Charge la config, les employés et l'historique en arrière-plan
   await Sync.chargerConfig();
-  State.draft = nouveauDraft(); // ré-applique caisses/services à jour
+  await Sync.chargerEmployes();
+  State.draft = nouveauDraft(); // ré-applique caisses/services/employé à jour
   await Sync.chargerComptages();
 
   if (State.currentScreen === 'nouveau') Render.screen();
+
+  // Demande la connexion si personne n'est identifié sur cet appareil
+  if (State.employes.length > 0 && !Auth.restaurerSession()) {
+    Auth.ouvrirEcranConnexion();
+  } else if (State.employeActif) {
+    State.draft = nouveauDraft();
+    Render.screen();
+  }
 }
 
 if (document.readyState === 'loading') {
