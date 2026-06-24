@@ -38,7 +38,7 @@ const EMPLOYES_DOC = "config/employes";
 /* ================================================================
    SECTION 2 — DÉNOMINATIONS (billets / pièces EUR)
    ================================================================ */
-const BILLETS = [50, 20, 10, 5];
+const BILLETS = [500, 200, 100, 50, 20, 10, 5];
 const PIECES  = [2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01];
 
 function formatMontant(n) {
@@ -127,8 +127,20 @@ function statutEcart(ecart, seuil) {
 /* ================================================================
    SECTION 7 — NAVIGATION
    ================================================================ */
+function estAdmin() {
+  // Si aucun employé n'est configuré (mode libre / premier démarrage), tout le monde est admin
+  if (State.employes.length === 0) return true;
+  if (!State.employeActif) return false;
+  const emp = State.employes.find(e => e.nom === State.employeActif.nom);
+  return !!(emp && emp.admin);
+}
+
 const Nav = {
   go(screen) {
+    if (screen === 'reglages' && !estAdmin()) {
+      toast("Accès réservé à l'administrateur", true);
+      return;
+    }
     if (screen === 'nouveau' && State.currentScreen !== 'nouveau') {
       State.draft = nouveauDraft();
     }
@@ -144,6 +156,8 @@ const Nav = {
       const el = document.getElementById('nav' + s.charAt(0).toUpperCase() + s.slice(1));
       if (el) el.classList.toggle('active', s === screen);
     });
+    const reglagesBtn = document.getElementById('navReglages');
+    if (reglagesBtn) reglagesBtn.style.display = estAdmin() ? '' : 'none';
   }
 };
 
@@ -213,6 +227,7 @@ const Auth = {
       this.pinSaisi = "";
       this.fermerEcranConnexion();
       State.draft = nouveauDraft();
+      Nav.updateActiveTab(State.currentScreen);
       Render.screen();
     } else {
       toast("Code incorrect", true);
@@ -225,6 +240,7 @@ const Auth = {
     State.employeActif = null;
     try { localStorage.removeItem(SESSION_KEY); } catch(e) {}
     this.employeChoisi = null;
+    Nav.updateActiveTab(State.currentScreen);
     this.ouvrirEcranConnexion();
   },
 
@@ -280,6 +296,7 @@ const Auth = {
     State.employeActif = { nom: "Non renseigné" };
     this.fermerEcranConnexion();
     State.draft = nouveauDraft();
+    Nav.updateActiveTab(State.currentScreen);
     Render.screen();
   }
 };
@@ -878,6 +895,7 @@ function renderListeEmployes() {
     <div class="denom-row" style="padding:6px 0;">
       <input type="text" value="${e.nom}" placeholder="Nom" style="margin-bottom:0; flex:2;" onchange="Reglages.modifierEmploye(${i}, 'nom', this.value)">
       <input type="text" inputmode="numeric" maxlength="4" value="${e.pin}" placeholder="PIN" style="margin-bottom:0; flex:1; text-align:center;" onchange="Reglages.modifierEmploye(${i}, 'pin', this.value)">
+      <button class="btn-icon admin-toggle ${e.admin ? 'active' : ''}" title="${e.admin ? 'Administrateur — clique pour retirer' : 'Donner les droits administrateur'}" onclick="Reglages.toggleAdmin(${i})">${e.admin ? '👑' : '🔒'}</button>
       <button class="btn-icon" style="background:var(--ivoire-dark); color:var(--ecart-bad); margin-left:8px;" onclick="Reglages.supprimerEmploye(${i})">✕</button>
     </div>
   `).join('');
@@ -887,7 +905,7 @@ function renderEcranReglages() {
   return `
     <div class="card">
       <div class="card-title">Session</div>
-      <div class="helper-text" style="margin-bottom:10px;">Connecté en tant que <strong>${State.employeActif ? State.employeActif.nom : 'inconnu'}</strong></div>
+      <div class="helper-text" style="margin-bottom:10px;">Connecté en tant que <strong>${State.employeActif ? State.employeActif.nom : 'inconnu'}</strong> ${estAdmin() ? '👑 (administrateur)' : ''}</div>
       <button class="btn btn-ghost" onclick="Auth.changerUtilisateur()">🔄 Changer d'utilisateur</button>
     </div>
 
@@ -966,7 +984,10 @@ const Reglages = {
       toast("Le PIN doit être composé de 4 chiffres", true);
       return;
     }
-    State.employes.push({ nom: nom.trim(), pin: pin });
+    // Le premier employé créé devient automatiquement administrateur
+    const estPremier = State.employes.length === 0;
+    State.employes.push({ nom: nom.trim(), pin: pin, admin: estPremier });
+    if (estPremier) toast(nom.trim() + " est administrateur par défaut (premier compte créé)");
     Render.screen();
   },
 
@@ -986,8 +1007,24 @@ const Reglages = {
   },
 
   supprimerEmploye(index) {
+    const emp = State.employes[index];
+    if (emp.admin && State.employes.filter(e => e.admin).length <= 1) {
+      toast("Impossible : il doit rester au moins un administrateur", true);
+      return;
+    }
     if (!confirm("Supprimer cet employé ?")) return;
     State.employes.splice(index, 1);
+    Render.screen();
+  },
+
+  toggleAdmin(index) {
+    const emp = State.employes[index];
+    if (emp.admin && State.employes.filter(e => e.admin).length <= 1) {
+      toast("Il doit rester au moins un administrateur", true);
+      return;
+    }
+    emp.admin = !emp.admin;
+    toast(emp.admin ? emp.nom + " est maintenant administrateur" : emp.nom + " n'est plus administrateur");
     Render.screen();
   },
 
@@ -1116,6 +1153,11 @@ const Export = {
    ================================================================ */
 const Render = {
   screen() {
+    if (State.currentScreen === 'reglages' && !estAdmin()) {
+      State.currentScreen = 'nouveau';
+      State.draft = nouveauDraft();
+      Nav.updateActiveTab('nouveau');
+    }
     const el = document.getElementById('screen');
     let html = '';
     switch (State.currentScreen) {
@@ -1164,10 +1206,14 @@ async function initApp() {
 
   // Demande la connexion si personne n'est identifié sur cet appareil
   if (State.employes.length > 0 && !Auth.restaurerSession()) {
+    Nav.updateActiveTab(State.currentScreen);
     Auth.ouvrirEcranConnexion();
   } else if (State.employeActif) {
     State.draft = nouveauDraft();
+    Nav.updateActiveTab(State.currentScreen);
     Render.screen();
+  } else {
+    Nav.updateActiveTab(State.currentScreen);
   }
 }
 

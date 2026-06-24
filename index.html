@@ -485,7 +485,14 @@ textarea{resize:vertical; min-height:60px;}
 }
 @keyframes spin{to{transform:rotate(360deg);}}
 
-::-webkit-scrollbar{width:0;height:0;}
+.btn-icon.admin-toggle{
+  background:var(--ivoire-dark);
+  color:var(--ink-soft);
+}
+.btn-icon.admin-toggle.active{
+  background:#fbf3e1;
+  color:var(--ecart-warn);
+}
 
 /* ---------- USER PILL (topbar) ---------- */
 .user-pill{
