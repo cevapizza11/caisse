@@ -581,6 +581,20 @@ textarea{resize:vertical; min-height:60px;}
 .pin-key:active{background:rgba(255,255,255,0.25);}
 .pin-key-action{font-size:18px; background:transparent; border:none;}
 
+/* Variante du pavé numérique pour fond clair (écran Tickets) */
+.ticket-key{
+  background:var(--ivoire-dark);
+  border:1.5px solid var(--border);
+  color:var(--ink);
+}
+.ticket-key:active{background:var(--border);}
+.ticket-key.pin-key-action{
+  background:transparent;
+  border:none;
+  color:var(--ecart-bad);
+}
+.ticket-key.pin-key-action:active{background:rgba(182,64,47,0.1);}
+
 .link-btn-light{
   background:none;
   border:none;
