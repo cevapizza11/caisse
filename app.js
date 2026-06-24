@@ -9,23 +9,26 @@
    (Console Firebase > Paramètres du projet > Configuration SDK)
    ================================================================ */
 const firebaseConfig = {
-  apiKey: "AIzaSyAcxFEGVmuzwnnsKVNY40oJG6PZfzTuCTE",
-  authDomain: "caisse-marmite-bleue-6a67b.firebaseapp.com",
-  projectId: "caisse-marmite-bleue-6a67b",
-  storageBucket: "caisse-marmite-bleue-6a67b.firebasestorage.app",
-  messagingSenderId: "33627481275",
-  appId: "1:33627481275:web:38dbab3f2f61c5cadcb59e"
+  apiKey: "VOTRE_API_KEY",
+  authDomain: "caisse-marmite-bleue.firebaseapp.com",
+  projectId: "caisse-marmite-bleue",
+  storageBucket: "caisse-marmite-bleue.appspot.com",
+  messagingSenderId: "VOTRE_SENDER_ID",
+  appId: "VOTRE_APP_ID"
 };
+
 let db = null;
 let firebaseReady = false;
 
 try {
   firebase.initializeApp(firebaseConfig);
   db = firebase.firestore();
-  // Certains réseaux/box/antivirus bloquent silencieusement le canal de connexion
-  // habituel de Firestore (WebSocket/streaming). Cette option détecte le problème
-  // et bascule automatiquement vers un mode de connexion plus compatible (long-polling).
-  db.settings({ experimentalAutoDetectLongPolling: true, merge: true });
+  // Certains réseaux/box/antivirus bloquent ou perturbent par intermittence le
+  // canal de connexion habituel de Firestore (WebSocket/streaming). On force ici
+  // systématiquement le mode "long-polling", plus lent de quelques centaines de
+  // millisecondes mais beaucoup plus fiable sur les connexions capricieuses —
+  // la détection automatique s'est révélée insuffisante sur certains réseaux.
+  db.settings({ experimentalForceLongPolling: true, merge: true });
   // Persistance hors-ligne : permet de continuer à utiliser l'app sans réseau
   db.enablePersistence({ synchronizeTabs: true }).catch(()=>{});
   firebaseReady = true;
