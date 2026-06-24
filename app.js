@@ -9,12 +9,12 @@
    (Console Firebase > Paramètres du projet > Configuration SDK)
    ================================================================ */
 const firebaseConfig = {
-  apiKey: "AIzaSyAcxFEGVmuzwnnsKVNY40oJG6PZfzTuCTE",
-  authDomain: "caisse-marmite-bleue-6a67b.firebaseapp.com",
-  projectId: "caisse-marmite-bleue-6a67b",
-  storageBucket: "caisse-marmite-bleue-6a67b.firebasestorage.app",
-  messagingSenderId: "33627481275",
-  appId: "1:33627481275:web:38dbab3f2f61c5cadcb59e"
+  apiKey: "VOTRE_API_KEY",
+  authDomain: "caisse-marmite-bleue.firebaseapp.com",
+  projectId: "caisse-marmite-bleue",
+  storageBucket: "caisse-marmite-bleue.appspot.com",
+  messagingSenderId: "VOTRE_SENDER_ID",
+  appId: "VOTRE_APP_ID"
 };
 
 let db = null;
@@ -416,6 +416,14 @@ const Sync = {
       }
     } catch (e) {
       console.error("Erreur chargement employés :", e);
+    }
+    // Filet de sécurité : si la liste existe mais qu'aucun employé n'a le statut admin
+    // (ex. données créées avant l'ajout de cette fonctionnalité), on évite de bloquer
+    // tout le monde dehors en promouvant automatiquement le premier de la liste.
+    if (State.employes.length > 0 && !State.employes.some(e => e.admin === true)) {
+      State.employes[0].admin = true;
+      Sync.sauvegarderEmployes();
+      console.warn("Aucun admin trouvé — " + State.employes[0].nom + " promu administrateur automatiquement.");
     }
   },
 
@@ -984,10 +992,11 @@ const Reglages = {
       toast("Le PIN doit être composé de 4 chiffres", true);
       return;
     }
-    // Le premier employé créé devient automatiquement administrateur
-    const estPremier = State.employes.length === 0;
-    State.employes.push({ nom: nom.trim(), pin: pin, admin: estPremier });
-    if (estPremier) toast(nom.trim() + " est administrateur par défaut (premier compte créé)");
+    // Devient automatiquement administrateur s'il n'existe encore aucun admin
+    // (plus robuste que de tester juste "premier employé créé")
+    const aucunAdmin = !State.employes.some(e => e.admin === true);
+    State.employes.push({ nom: nom.trim(), pin: pin, admin: aucunAdmin });
+    if (aucunAdmin) toast(nom.trim() + " est administrateur par défaut (aucun admin existant)");
     Render.screen();
   },
 
