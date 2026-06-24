@@ -9,12 +9,12 @@
    (Console Firebase > Paramètres du projet > Configuration SDK)
    ================================================================ */
 const firebaseConfig = {
-  apiKey: "AIzaSyAcxFEGVmuzwnnsKVNY40oJG6PZfzTuCTE",
-  authDomain: "caisse-marmite-bleue-6a67b.firebaseapp.com",
-  projectId: "caisse-marmite-bleue-6a67b",
-  storageBucket: "caisse-marmite-bleue-6a67b.firebasestorage.app",
-  messagingSenderId: "33627481275",
-  appId: "1:33627481275:web:38dbab3f2f61c5cadcb59e"
+  apiKey: "VOTRE_API_KEY",
+  authDomain: "caisse-marmite-bleue.firebaseapp.com",
+  projectId: "caisse-marmite-bleue",
+  storageBucket: "caisse-marmite-bleue.appspot.com",
+  messagingSenderId: "VOTRE_SENDER_ID",
+  appId: "VOTRE_APP_ID"
 };
 
 let db = null;
@@ -36,6 +36,7 @@ try {
 }
 
 const COLLECTION = "comptages";
+const TICKETS_COLLECTION = "tickets";
 const CAISSES_DOC = "config/caisses";
 const EMPLOYES_DOC = "config/employes";
 
@@ -75,10 +76,13 @@ const State = {
   employes: [],         // [{nom, pin}] chargés depuis Firestore
   employeActif: null,   // {nom} de la personne connectée sur cet appareil
   comptages: [],       // chargés depuis Firestore
+  tickets: [],          // chargés depuis Firestore (tickets de vente)
   historyFilter: { caisse: 'toutes', periode: '30j' },
   draft: null,         // comptage en cours de saisie
   editingHistId: null,
-  seuilEcartAlerte: 5  // € — au-delà, écart affiché en rouge
+  seuilEcartAlerte: 5,  // € — au-delà, écart affiché en rouge
+  ticketContexte: null, // {caisse, service, date} sélectionné sur l'écran Tickets
+  ticketMontantSaisie: "" // montant en cours de frappe sur le pavé numérique tickets
 };
 
 const SESSION_KEY = 'caisseMarmiteEmployeActif';
@@ -96,7 +100,8 @@ function nouveauDraft() {
     type: "cloture",       // 'fond' (ouverture) ou 'cloture' (fermeture)
     employe: State.employeActif ? State.employeActif.nom : "",
     denomQte: denomQte,
-    caTheorique: null,     // saisi manuellement, ou null si pas de rapprochement
+    caTheorique: null,     // CA théorique espèces — auto-rempli depuis les tickets si dispo, sinon saisi manuellement
+    caTheoriqueCB: null,   // relevé du terminal CB, saisi manuellement (l'app ne peut pas le connaître)
     fondDeCaisse: 0,       // montant de départ en caisse, pour calcul écart sur clôture
     commentaire: "",
     createdAt: null
@@ -118,6 +123,26 @@ function calculEcart(draft) {
   const totalCompte = calculTotalDraft(draft);
   const especesAttendues = (parseFloat(draft.fondDeCaisse) || 0) + (parseFloat(draft.caTheorique) || 0);
   return Math.round((totalCompte - especesAttendues) * 100) / 100;
+}
+
+function calculEcartCB(draft) {
+  if (draft.caTheoriqueCB === null || draft.caTheoriqueCB === undefined || draft.caTheoriqueCB === "") return null;
+  const totalTicketsCB = totauxTicketsPour(draft.caisse, draft.service, draft.date).cb;
+  return Math.round((parseFloat(draft.caTheoriqueCB) - totalTicketsCB) * 100) / 100;
+}
+
+// Agrège tous les tickets correspondant à une caisse/service/date donnés,
+// et retourne le total par mode de paiement.
+function totauxTicketsPour(caisse, service, date) {
+  const tickets = State.tickets.filter(t => t.caisse === caisse && t.service === service && t.date === date);
+  const especes = tickets.reduce((s, t) => s + (t.mode === 'especes' ? t.montant : 0), 0);
+  const cb = tickets.reduce((s, t) => s + (t.mode === 'cb' ? t.montant : 0), 0);
+  return {
+    especes: Math.round(especes * 100) / 100,
+    cb: Math.round(cb * 100) / 100,
+    total: Math.round((especes + cb) * 100) / 100,
+    nbTickets: tickets.length
+  };
 }
 
 function statutEcart(ecart, seuil) {
@@ -148,6 +173,13 @@ const Nav = {
     if (screen === 'nouveau' && State.currentScreen !== 'nouveau') {
       State.draft = nouveauDraft();
     }
+    if (screen === 'tickets' && !State.ticketContexte) {
+      State.ticketContexte = {
+        caisse: State.caisses[0] || "Caisse 1",
+        service: State.services[0] || "Service midi",
+        date: new Date().toISOString().slice(0,10)
+      };
+    }
     State.currentScreen = screen;
     State.editingHistId = null;
     this.updateActiveTab(screen);
@@ -156,7 +188,7 @@ const Nav = {
     window.scrollTo(0,0);
   },
   updateActiveTab(screen) {
-    ['nouveau','historique','stats','reglages'].forEach(s => {
+    ['nouveau','tickets','historique','stats','reglages'].forEach(s => {
       const el = document.getElementById('nav' + s.charAt(0).toUpperCase() + s.slice(1));
       if (el) el.classList.toggle('active', s === screen);
     });
@@ -350,6 +382,7 @@ const Sync = {
     try {
       const total = calculTotalDraft(draft);
       const ecart = calculEcart(draft);
+      const ecartCB = calculEcartCB(draft);
       const payload = {
         date: draft.date,
         heure: draft.heure,
@@ -359,10 +392,12 @@ const Sync = {
         employe: draft.employe || "Non renseigné",
         denomQte: draft.denomQte,
         caTheorique: draft.caTheorique === "" ? null : draft.caTheorique,
+        caTheoriqueCB: draft.caTheoriqueCB === "" ? null : draft.caTheoriqueCB,
         fondDeCaisse: parseFloat(draft.fondDeCaisse) || 0,
         commentaire: draft.commentaire || "",
         total: total,
         ecart: ecart,
+        ecartCB: ecartCB,
         createdAt: draft.createdAt || Date.now()
       };
       if (draft.id) {
@@ -389,6 +424,60 @@ const Sync = {
       return true;
     } catch (e) {
       console.error("Erreur suppression :", e);
+      this.setStatus('off');
+      toast("Erreur lors de la suppression", true);
+      return false;
+    }
+  },
+
+  /* -------- TICKETS DE VENTE -------- */
+  async chargerTickets() {
+    if (!firebaseReady) { return; }
+    try {
+      const snap = await db.collection(TICKETS_COLLECTION).orderBy('createdAt', 'desc').limit(2000).get();
+      State.tickets = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    } catch (e) {
+      console.error("Erreur chargement tickets :", e);
+      toast("Impossible de charger les tickets", true);
+    }
+  },
+
+  async sauvegarderTicket(ticket) {
+    if (!firebaseReady) { toast("Pas de connexion — ticket non sauvegardé", true); return false; }
+    this.setStatus('busy');
+    try {
+      const payload = {
+        date: ticket.date,
+        heure: ticket.heure,
+        caisse: ticket.caisse,
+        service: ticket.service,
+        mode: ticket.mode,        // 'especes' ou 'cb'
+        montant: Math.round(parseFloat(ticket.montant) * 100) / 100,
+        employe: ticket.employe || "Non renseigné",
+        createdAt: Date.now()
+      };
+      const ref = await db.collection(TICKETS_COLLECTION).add(payload);
+      State.tickets.unshift({ id: ref.id, ...payload });
+      this.setStatus('ok');
+      return true;
+    } catch (e) {
+      console.error("Erreur sauvegarde ticket :", e);
+      this.setStatus('off');
+      toast("Erreur lors de la sauvegarde du ticket", true);
+      return false;
+    }
+  },
+
+  async supprimerTicket(id) {
+    if (!firebaseReady) return false;
+    this.setStatus('busy');
+    try {
+      await db.collection(TICKETS_COLLECTION).doc(id).delete();
+      State.tickets = State.tickets.filter(t => t.id !== id);
+      this.setStatus('ok');
+      return true;
+    } catch (e) {
+      console.error("Erreur suppression ticket :", e);
       this.setStatus('off');
       toast("Erreur lors de la suppression", true);
       return false;
@@ -487,8 +576,18 @@ function renderDenomRow(denom, prefix, isPiece) {
 function renderEcranNouveau() {
   const d = State.draft;
   const total = calculTotalDraft(d);
-  const ecart = calculEcart(d);
+  const totauxTickets = totauxTicketsPour(d.caisse, d.service, d.date);
+
+  // Si le CA théorique espèces n'a pas été saisi manuellement, on propose
+  // automatiquement le total des tickets espèces enregistrés pour ce contexte.
+  const caTheoriqueEffectif = (d.caTheorique === null || d.caTheorique === undefined || d.caTheorique === "")
+    ? (totauxTickets.nbTickets > 0 ? totauxTickets.especes : null)
+    : parseFloat(d.caTheorique);
+  const draftPourCalcul = { ...d, caTheorique: caTheoriqueEffectif };
+  const ecart = calculEcart(draftPourCalcul);
   const statut = statutEcart(ecart, State.seuilEcartAlerte);
+  const ecartCB = calculEcartCB(d);
+  const statutCB = statutEcart(ecartCB, State.seuilEcartAlerte);
 
   const optionsCaisses = State.caisses.map(c => `<option value="${c}" ${c===d.caisse?'selected':''}>${c}</option>`).join('');
   const optionsServices = State.services.map(s => `<option value="${s}" ${s===d.service?'selected':''}>${s}</option>`).join('');
@@ -525,16 +624,40 @@ function renderEcranNouveau() {
 
     ${d.type === 'cloture' ? `
     <div class="card">
-      <div class="card-title">Rapprochement (optionnel)</div>
+      <div class="card-title">Tickets saisis pour ce service</div>
+      ${totauxTickets.nbTickets === 0 ? `
+        <div class="helper-text" style="margin-bottom:0;">Aucun ticket saisi pour cette caisse/service/date. Va dans l'onglet 🧾 Tickets pour les enregistrer au fur et à mesure du service, ou saisis le CA théorique manuellement ci-dessous.</div>
+      ` : `
+        <div class="grid-2">
+          <div>
+            <div class="helper-text" style="margin-bottom:2px;">Espèces (${totauxTickets.nbTickets} ticket${totauxTickets.nbTickets>1?'s':''})</div>
+            <div style="font-family:'Cormorant',serif; font-size:22px; font-weight:700; color:var(--teal-dark);">${formatMontant(totauxTickets.especes)}</div>
+          </div>
+          <div>
+            <div class="helper-text" style="margin-bottom:2px;">CB</div>
+            <div style="font-family:'Cormorant',serif; font-size:22px; font-weight:700; color:var(--terracotta);">${formatMontant(totauxTickets.cb)}</div>
+          </div>
+        </div>
+      `}
+    </div>
+
+    <div class="card">
+      <div class="card-title">Rapprochement</div>
       <label>Fond de caisse de départ (€)</label>
       <input type="number" inputmode="decimal" step="0.01" value="${d.fondDeCaisse || ''}"
              placeholder="0,00"
              onchange="Draft.setField('fondDeCaisse', this.value)">
-      <label>CA théorique (relevé Z / TPE) (€)</label>
+      <label>CA théorique espèces (€)</label>
       <input type="number" inputmode="decimal" step="0.01" value="${d.caTheorique === null ? '' : d.caTheorique}"
-             placeholder="Laisser vide si pas de rapprochement"
+             placeholder="${totauxTickets.nbTickets > 0 ? 'Auto : ' + formatMontant(totauxTickets.especes) + ' (depuis les tickets)' : 'Laisser vide si pas de rapprochement'}"
              onchange="Draft.setField('caTheorique', this.value)">
-      <div class="helper-text">Écart = Total compté − (Fond de caisse + CA théorique)</div>
+      <div class="helper-text">${totauxTickets.nbTickets > 0 && (d.caTheorique === null || d.caTheorique === undefined || d.caTheorique === '') ? 'Pré-rempli automatiquement depuis les tickets espèces — modifie si besoin.' : 'Écart espèces = Total compté − (Fond de caisse + CA théorique espèces)'}</div>
+
+      <label>Relevé terminal CB (€)</label>
+      <input type="number" inputmode="decimal" step="0.01" value="${d.caTheoriqueCB === null ? '' : d.caTheoriqueCB}"
+             placeholder="Montant indiqué par le TPE en fin de service"
+             onchange="Draft.setField('caTheoriqueCB', this.value)">
+      <div class="helper-text">Écart CB = Relevé terminal − Total des tickets CB saisis (${formatMontant(totauxTickets.cb)})</div>
     </div>` : ''}
 
     <div class="card">
@@ -554,8 +677,14 @@ function renderEcranNouveau() {
 
     ${ecart !== null ? `
     <div class="ecart-box ${statut}">
-      <span class="lbl">${statut==='ok' ? '✓ Caisse juste' : statut==='warn' ? '⚠ Petit écart' : '⚠ Écart important'}</span>
+      <span class="lbl">${statut==='ok' ? '✓ Espèces juste' : statut==='warn' ? '⚠ Petit écart espèces' : '⚠ Écart espèces important'}</span>
       <span class="val">${formatMontantSigne(ecart)}</span>
+    </div>` : ''}
+
+    ${ecartCB !== null ? `
+    <div class="ecart-box ${statutCB}">
+      <span class="lbl">${statutCB==='ok' ? '✓ CB juste' : statutCB==='warn' ? '⚠ Petit écart CB' : '⚠ Écart CB important'}</span>
+      <span class="val">${formatMontantSigne(ecartCB)}</span>
     </div>` : ''}
 
     <div class="card">
@@ -626,12 +755,174 @@ const Draft = {
       toast("Le total est à 0 € — vérifie ta saisie avant d'enregistrer", true);
       return;
     }
+    // Si le CA théorique espèces n'a pas été saisi à la main, on fige la valeur
+    // automatique issue des tickets au moment de l'enregistrement, pour que
+    // l'historique reflète exactement l'écart qui était affiché à l'écran.
+    if ((d.caTheorique === null || d.caTheorique === undefined || d.caTheorique === "") && d.type === 'cloture') {
+      const totauxTickets = totauxTicketsPour(d.caisse, d.service, d.date);
+      if (totauxTickets.nbTickets > 0) d.caTheorique = totauxTickets.especes;
+    }
     const ok = await Sync.sauvegarderComptage(d);
     if (ok) {
       toast(d.id ? "Comptage modifié" : "Comptage enregistré ✓");
       await Sync.chargerComptages();
       State.draft = nouveauDraft();
       Nav.go('historique');
+    }
+  }
+};
+
+/* ================================================================
+   SECTION 9B — RENDU : ÉCRAN "TICKETS" (saisie des ventes en direct)
+   ================================================================ */
+function renderEcranTickets() {
+  if (!State.ticketContexte) {
+    State.ticketContexte = {
+      caisse: State.caisses[0] || "Caisse 1",
+      service: State.services[0] || "Service midi",
+      date: new Date().toISOString().slice(0,10)
+    };
+  }
+  const ctx = State.ticketContexte;
+  const totaux = totauxTicketsPour(ctx.caisse, ctx.service, ctx.date);
+  const ticketsJour = State.tickets
+    .filter(t => t.caisse === ctx.caisse && t.service === ctx.service && t.date === ctx.date)
+    .sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
+
+  const optionsCaisses = State.caisses.map(c => `<option value="${c}" ${c===ctx.caisse?'selected':''}>${c}</option>`).join('');
+  const optionsServices = State.services.map(s => `<option value="${s}" ${s===ctx.service?'selected':''}>${s}</option>`).join('');
+
+  const montant = State.ticketMontantSaisie || "0";
+  const montantAffiche = (parseInt(montant, 10) / 100).toLocaleString('fr-FR', {minimumFractionDigits:2, maximumFractionDigits:2});
+
+  const pad = ['1','2','3','4','5','6','7','8','9','','0','⌫'].map(k => {
+    if (k === '') return `<div></div>`;
+    if (k === '⌫') return `<button class="pin-key pin-key-action ticket-key" onclick="Tickets.effacerChiffre()">⌫</button>`;
+    return `<button class="pin-key ticket-key" onclick="Tickets.saisirChiffre('${k}')">${k}</button>`;
+  }).join('');
+
+  const ticketsHtml = ticketsJour.length === 0 ? `
+    <div class="empty-state" style="padding:24px;">
+      <p>Aucun ticket saisi pour ce service.</p>
+    </div>` : ticketsJour.map(t => `
+      <div class="hist-item" style="cursor:default;">
+        <div class="hist-main">
+          <div class="hist-titre">${t.mode === 'especes' ? '💶 Espèces' : '💳 CB'}</div>
+          <div class="hist-meta">${t.heure || ''}${t.employe ? ' · ' + t.employe : ''}</div>
+        </div>
+        <div class="hist-right" style="display:flex; align-items:center; gap:10px;">
+          <div class="hist-montant">${formatMontant(t.montant)}</div>
+          <button class="btn-icon" style="background:var(--ivoire-dark); color:var(--ecart-bad);" onclick="Tickets.supprimer('${t.id}')">✕</button>
+        </div>
+      </div>`).join('');
+
+  return `
+    <div class="card">
+      <div class="card-title">Contexte</div>
+      <div class="field-row">
+        <div>
+          <label>Caisse / poste</label>
+          <select onchange="Tickets.setContexte('caisse', this.value)">${optionsCaisses}</select>
+        </div>
+        <div>
+          <label>Service</label>
+          <select onchange="Tickets.setContexte('service', this.value)">${optionsServices}</select>
+        </div>
+      </div>
+      <label>Date</label>
+      <input type="text" value="${formatDate(ctx.date)}" readonly onclick="Tickets.openDatePicker()" style="background:#fafaf7;">
+    </div>
+
+    <div class="card" style="text-align:center;">
+      <div class="card-title" style="justify-content:center;">Montant du ticket</div>
+      <div style="font-family:'Cormorant',serif; font-size:42px; font-weight:700; color:var(--teal-dark); margin:8px 0 18px;">${montantAffiche} €</div>
+      <div class="pin-pad" style="margin:0 auto 18px;">${pad}</div>
+      <div class="btn-full-row">
+        <button class="btn btn-primary" style="background:var(--teal-dark);" onclick="Tickets.enregistrer('especes')">💶 Espèces</button>
+        <button class="btn btn-primary" onclick="Tickets.enregistrer('cb')">💳 CB</button>
+      </div>
+    </div>
+
+    <div class="total-banner">
+      <span class="lbl">Total espèces</span>
+      <span class="val">${formatMontant(totaux.especes)}</span>
+    </div>
+    <div class="total-banner" style="background:var(--terracotta-dark);">
+      <span class="lbl">Total CB</span>
+      <span class="val">${formatMontant(totaux.cb)}</span>
+    </div>
+
+    <div class="divider-text">Tickets du service (${ticketsJour.length})</div>
+    ${ticketsHtml}
+  `;
+}
+
+const Tickets = {
+  setContexte(champ, value) {
+    State.ticketContexte[champ] = value;
+    Render.screen();
+  },
+
+  openDatePicker() {
+    const input = document.createElement('input');
+    input.type = 'date';
+    input.value = State.ticketContexte.date;
+    input.style.position = 'fixed';
+    input.style.top = '-100px';
+    document.body.appendChild(input);
+    input.addEventListener('change', () => {
+      State.ticketContexte.date = input.value;
+      Render.screen();
+      document.body.removeChild(input);
+    });
+    input.click();
+    input.showPicker ? input.showPicker() : input.focus();
+  },
+
+  saisirChiffre(c) {
+    let m = State.ticketMontantSaisie || "";
+    if (m.length >= 7) return; // limite raisonnable (jusqu'à 99999,99 €)
+    m += c;
+    State.ticketMontantSaisie = m.replace(/^0+(?=\d)/, ''); // évite les zéros en tête
+    Render.screen();
+  },
+
+  effacerChiffre() {
+    State.ticketMontantSaisie = (State.ticketMontantSaisie || "").slice(0, -1);
+    Render.screen();
+  },
+
+  async enregistrer(mode) {
+    const centimes = parseInt(State.ticketMontantSaisie || "0", 10);
+    if (!centimes || centimes === 0) {
+      toast("Saisis un montant avant d'enregistrer", true);
+      return;
+    }
+    const montant = centimes / 100;
+    const ctx = State.ticketContexte;
+    const ticket = {
+      date: ctx.date,
+      heure: new Date().toTimeString().slice(0,5),
+      caisse: ctx.caisse,
+      service: ctx.service,
+      mode: mode,
+      montant: montant,
+      employe: State.employeActif ? State.employeActif.nom : ""
+    };
+    const ok = await Sync.sauvegarderTicket(ticket);
+    if (ok) {
+      toast((mode === 'especes' ? 'Espèces' : 'CB') + " — " + formatMontant(montant) + " enregistré");
+      State.ticketMontantSaisie = "";
+      Render.screen();
+    }
+  },
+
+  async supprimer(id) {
+    if (!confirm("Supprimer ce ticket ?")) return;
+    const ok = await Sync.supprimerTicket(id);
+    if (ok) {
+      toast("Ticket supprimé");
+      Render.screen();
     }
   }
 };
@@ -787,8 +1078,14 @@ function renderDetailModal() {
 
       ${c.ecart !== null && c.ecart !== undefined ? `
       <div class="ecart-box ${statut}">
-        <span class="lbl">Écart (fond ${formatMontant(c.fondDeCaisse||0)} + CA théo. ${formatMontant(c.caTheorique||0)})</span>
+        <span class="lbl">Écart espèces (fond ${formatMontant(c.fondDeCaisse||0)} + théo. ${formatMontant(c.caTheorique||0)})</span>
         <span class="val">${formatMontantSigne(c.ecart)}</span>
+      </div>` : ''}
+
+      ${c.ecartCB !== null && c.ecartCB !== undefined ? `
+      <div class="ecart-box ${statutEcart(c.ecartCB, State.seuilEcartAlerte)}" style="margin-top:8px;">
+        <span class="lbl">Écart CB (relevé ${formatMontant(c.caTheoriqueCB||0)})</span>
+        <span class="val">${formatMontantSigne(c.ecartCB)}</span>
       </div>` : ''}
 
       ${c.commentaire ? `<div class="card" style="margin-top:14px;"><label>Commentaire</label><div>${c.commentaire}</div></div>` : ''}
@@ -1067,19 +1364,45 @@ const Export = {
       "Service": c.service,
       "Compté par": c.employe || "",
       "Fond de caisse (€)": c.fondDeCaisse || 0,
-      "CA théorique (€)": c.caTheorique === null || c.caTheorique === undefined ? "" : c.caTheorique,
+      "CA théorique espèces (€)": c.caTheorique === null || c.caTheorique === undefined ? "" : c.caTheorique,
+      "Relevé terminal CB (€)": c.caTheoriqueCB === null || c.caTheoriqueCB === undefined ? "" : c.caTheoriqueCB,
       "Total compté (€)": c.total,
-      "Écart (€)": c.ecart === null || c.ecart === undefined ? "" : c.ecart,
+      "Écart espèces (€)": c.ecart === null || c.ecart === undefined ? "" : c.ecart,
+      "Écart CB (€)": c.ecartCB === null || c.ecartCB === undefined ? "" : c.ecartCB,
       "Commentaire": c.commentaire || ""
     }));
 
     const ws = XLSX.utils.json_to_sheet(rows);
     ws['!cols'] = [
       {wch:11},{wch:7},{wch:14},{wch:10},{wch:16},{wch:16},
-      {wch:16},{wch:15},{wch:15},{wch:10},{wch:30}
+      {wch:16},{wch:18},{wch:16},{wch:15},{wch:14},{wch:12},{wch:30}
     ];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Comptages");
+
+    // Feuille additionnelle : détail des tickets correspondant aux mêmes filtres
+    const datesComptages = new Set(list.map(c => c.date));
+    const ticketsConcernes = State.tickets.filter(t => {
+      const matchCaisse = State.historyFilter.caisse === 'toutes' || t.caisse === State.historyFilter.caisse;
+      const matchDate = datesComptages.has(t.date) || State.historyFilter.periode === 'tout';
+      return matchCaisse && matchDate;
+    });
+    if (ticketsConcernes.length > 0) {
+      const rowsTickets = ticketsConcernes
+        .sort((a,b) => (a.createdAt||0) - (b.createdAt||0))
+        .map(t => ({
+          "Date": formatDate(t.date),
+          "Heure": t.heure || "",
+          "Caisse": t.caisse,
+          "Service": t.service,
+          "Mode": t.mode === 'especes' ? 'Espèces' : 'CB',
+          "Montant (€)": t.montant,
+          "Saisi par": t.employe || ""
+        }));
+      const wsTickets = XLSX.utils.json_to_sheet(rowsTickets);
+      wsTickets['!cols'] = [{wch:11},{wch:7},{wch:14},{wch:16},{wch:10},{wch:12},{wch:16}];
+      XLSX.utils.book_append_sheet(wb, wsTickets, "Tickets");
+    }
 
     const dateStr = new Date().toISOString().slice(0,10);
     XLSX.writeFile(wb, `comptages-marmite-bleue-${dateStr}.xlsx`);
@@ -1107,10 +1430,18 @@ const Export = {
     const ecartHtml = (c.ecart !== null && c.ecart !== undefined) ? `
       <table class="pdf-table" style="margin-top:14px;">
         <tr><td>Fond de caisse de départ</td><td style="text-align:right;">${formatMontant(c.fondDeCaisse||0)}</td></tr>
-        <tr><td>CA théorique (relevé)</td><td style="text-align:right;">${formatMontant(c.caTheorique||0)}</td></tr>
-        <tr style="font-weight:700;"><td>Total attendu</td><td style="text-align:right;">${formatMontant((c.fondDeCaisse||0)+(c.caTheorique||0))}</td></tr>
+        <tr><td>CA théorique espèces</td><td style="text-align:right;">${formatMontant(c.caTheorique||0)}</td></tr>
+        <tr style="font-weight:700;"><td>Total attendu (espèces)</td><td style="text-align:right;">${formatMontant((c.fondDeCaisse||0)+(c.caTheorique||0))}</td></tr>
         <tr style="font-weight:700; color:${statut==='ok'?'#2d7d4f':statut==='warn'?'#c19a2e':'#b6402f'};">
-          <td>ÉCART</td><td style="text-align:right;">${formatMontantSigne(c.ecart)}</td>
+          <td>ÉCART ESPÈCES</td><td style="text-align:right;">${formatMontantSigne(c.ecart)}</td>
+        </tr>
+      </table>` : '';
+
+    const ecartCBHtml = (c.ecartCB !== null && c.ecartCB !== undefined) ? `
+      <table class="pdf-table" style="margin-top:10px;">
+        <tr><td>Relevé terminal CB</td><td style="text-align:right;">${formatMontant(c.caTheoriqueCB||0)}</td></tr>
+        <tr style="font-weight:700; color:${statutEcart(c.ecartCB, State.seuilEcartAlerte)==='ok'?'#2d7d4f':statutEcart(c.ecartCB, State.seuilEcartAlerte)==='warn'?'#c19a2e':'#b6402f'};">
+          <td>ÉCART CB</td><td style="text-align:right;">${formatMontantSigne(c.ecartCB)}</td>
         </tr>
       </table>` : '';
 
@@ -1148,6 +1479,7 @@ const Export = {
         <div class="total-row"><span>TOTAL COMPTÉ</span><span>${formatMontant(c.total)}</span></div>
 
         ${ecartHtml}
+        ${ecartCBHtml}
         ${commentaireHtml}
 
         <div class="meta">
@@ -1177,6 +1509,7 @@ const Render = {
     let html = '';
     switch (State.currentScreen) {
       case 'nouveau': html = renderEcranNouveau(); break;
+      case 'tickets': html = renderEcranTickets(); break;
       case 'historique': html = renderEcranHistorique(); break;
       case 'stats': html = renderEcranStats(); break;
       case 'reglages': html = renderEcranReglages(); break;
@@ -1188,6 +1521,7 @@ const Render = {
     if (sub) {
       const titreEcran = {
         nouveau: 'Nouveau comptage',
+        tickets: 'Saisie des tickets',
         historique: 'Historique des comptages',
         stats: "Statistiques d'écarts",
         reglages: 'Réglages'
@@ -1216,6 +1550,7 @@ async function initApp() {
   await Sync.chargerEmployes();
   State.draft = nouveauDraft(); // ré-applique caisses/services/employé à jour
   await Sync.chargerComptages();
+  await Sync.chargerTickets();
 
   if (State.currentScreen === 'nouveau') Render.screen();
 
