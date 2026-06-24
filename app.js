@@ -23,6 +23,10 @@ let firebaseReady = false;
 try {
   firebase.initializeApp(firebaseConfig);
   db = firebase.firestore();
+  // Certains réseaux/box/antivirus bloquent silencieusement le canal de connexion
+  // habituel de Firestore (WebSocket/streaming). Cette option détecte le problème
+  // et bascule automatiquement vers un mode de connexion plus compatible (long-polling).
+  db.settings({ experimentalAutoDetectLongPolling: true, merge: true });
   // Persistance hors-ligne : permet de continuer à utiliser l'app sans réseau
   db.enablePersistence({ synchronizeTabs: true }).catch(()=>{});
   firebaseReady = true;
@@ -38,8 +42,8 @@ const EMPLOYES_DOC = "config/employes";
 /* ================================================================
    SECTION 2 — DÉNOMINATIONS (billets / pièces EUR)
    ================================================================ */
-const BILLETS = [50, 20, 10, 5];
-const PIECES  = [2, 1, 0.5, 0.2, 0.1, 0.05];
+const BILLETS = [500, 200, 100, 50, 20, 10, 5];
+const PIECES  = [2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01];
 
 function formatMontant(n) {
   if (isNaN(n)) n = 0;
