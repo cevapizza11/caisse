@@ -9,12 +9,12 @@
    (Console Firebase > Paramètres du projet > Configuration SDK)
    ================================================================ */
 const firebaseConfig = {
-  apiKey: "VOTRE_API_KEY",
-  authDomain: "caisse-marmite-bleue.firebaseapp.com",
-  projectId: "caisse-marmite-bleue",
-  storageBucket: "caisse-marmite-bleue.appspot.com",
-  messagingSenderId: "VOTRE_SENDER_ID",
-  appId: "VOTRE_APP_ID"
+  apiKey: "AIzaSyAcxFEGVmuzwnnsKVNY40oJG6PZfzTuCTE",
+  authDomain: "caisse-marmite-bleue-6a67b.firebaseapp.com",
+  projectId: "caisse-marmite-bleue-6a67b",
+  storageBucket: "caisse-marmite-bleue-6a67b.firebasestorage.app",
+  messagingSenderId: "33627481275",
+  appId: "1:33627481275:web:38dbab3f2f61c5cadcb59e"
 };
 
 let db = null;
