@@ -1778,6 +1778,12 @@ const Export = {
       <tr><td>${m.icone} ${m.label}</td><td style="text-align:right;">${formatMontant(d.totauxParMode[m.cle])}</td></tr>
     `).join('');
 
+    const ticketsTries = [...d.ticketsJour].sort((a,b) => (a.createdAt||0) - (b.createdAt||0));
+    const lignesDetailTickets = ticketsTries.map(t => {
+      const info = modeInfo(t.mode);
+      return `<tr><td style="padding-left:18px; font-size:12px; color:#6b6258;">${t.heure || ''} — ${info.icone} ${info.label}${t.employe ? ' (' + t.employe + ')' : ''}</td><td style="text-align:right; font-size:12px; color:#6b6258;">${formatMontant(t.montant)}</td></tr>`;
+    }).join('');
+
     return `
       <div style="margin-bottom:26px; padding-bottom:20px; border-bottom:2px dashed #c9bfa9;">
         <h2 style="font-size:17px; color:#163f3e; margin-bottom:10px;">${d.caisse}</h2>
@@ -1796,6 +1802,9 @@ const Export = {
           <table class="pdf-table">
             ${lignesModesTickets}
             <tr style="font-weight:700;"><td>TOTAL TICKETS</td><td style="text-align:right;">${formatMontant(d.totalGeneralTickets)}</td></tr>
+          </table>
+          <table class="pdf-table" style="margin-top:6px;">
+            ${lignesDetailTickets}
           </table>
         ` : `<div class="helper-text" style="margin-top:10px;">Aucun ticket saisi ce jour pour cette caisse.</div>`}
       </div>`;
