@@ -23,12 +23,6 @@ let firebaseReady = false;
 try {
   firebase.initializeApp(firebaseConfig);
   db = firebase.firestore();
-  // Certains réseaux/box/antivirus bloquent ou perturbent par intermittence le
-  // canal de connexion habituel de Firestore (WebSocket/streaming). On force ici
-  // systématiquement le mode "long-polling", plus lent de quelques centaines de
-  // millisecondes mais beaucoup plus fiable sur les connexions capricieuses —
-  // la détection automatique s'est révélée insuffisante sur certains réseaux.
-  db.settings({ experimentalForceLongPolling: true, merge: true });
   // Persistance hors-ligne : permet de continuer à utiliser l'app sans réseau
   db.enablePersistence({ synchronizeTabs: true }).catch(()=>{});
   firebaseReady = true;
