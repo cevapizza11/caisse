@@ -40,8 +40,8 @@ const EMPLOYES_DOC = "config/employes";
 /* ================================================================
    SECTION 2 — DÉNOMINATIONS (billets / pièces EUR)
    ================================================================ */
-const BILLETS = [50, 20, 10, 5];
-const PIECES  = [2, 1, 0.5, 0.2, 0.1, 0.05];
+const BILLETS = [500, 200, 100, 50, 20, 10, 5];
+const PIECES  = [2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01];
 
 // Liste centrale des modes de paiement gérés par l'app. Toute la logique
 // (saisie tickets, rapprochement, écarts, exports) s'appuie sur cette liste
@@ -96,7 +96,8 @@ const State = {
   ticketContexte: null, // {caisse, service, date} sélectionné sur l'écran Tickets
   ticketMontantSaisie: "", // montant en cours de frappe sur le pavé numérique tickets
   petiteCaisseDraft: null, // sortie de petite caisse en cours de saisie
-  petiteCaisseFiltrePeriode: '30j'
+  petiteCaisseFiltrePeriode: '30j',
+  rapportDate: new Date().toISOString().slice(0,10) // date sélectionnée pour le rapport journalier
 };
 
 const SESSION_KEY = 'caisseMarmiteEmployeActif';
@@ -187,6 +188,43 @@ function totauxTicketsPour(caisse, service, date) {
     cb: parMode.cb,
     total: Math.round(total * 100) / 100,
     nbTickets: tickets.length
+  };
+}
+
+// Agrège toutes les données (comptages, tickets) d'une date donnée, pour une
+// caisse précise ou pour toutes les caisses confondues (caisse = null).
+// Utilisé pour générer le rapport journalier (global ou par caisse).
+function donneesJourPour(date, caisse) {
+  const filtreCaisse = (x) => caisse ? x.caisse === caisse : true;
+
+  const comptagesJour = State.comptages.filter(c => c.date === date && filtreCaisse(c));
+  const ouvertures = comptagesJour.filter(c => c.type === 'fond').sort((a,b) => (a.createdAt||0)-(b.createdAt||0));
+  const clotures = comptagesJour.filter(c => c.type === 'cloture').sort((a,b) => (a.createdAt||0)-(b.createdAt||0));
+
+  const ticketsJour = State.tickets.filter(t => t.date === date && filtreCaisse(t));
+  const totauxParMode = {};
+  let totalGeneral = 0;
+  MODES_PAIEMENT.forEach(m => {
+    const somme = ticketsJour.reduce((s, t) => s + (t.mode === m.cle ? t.montant : 0), 0);
+    totauxParMode[m.cle] = Math.round(somme * 100) / 100;
+    totalGeneral += somme;
+  });
+
+  const totalCompteCloture = clotures.reduce((s, c) => s + (c.total || 0), 0);
+  const totalFondOuverture = ouvertures.reduce((s, c) => s + (c.total || 0), 0);
+
+  return {
+    caisse: caisse || 'Toutes les caisses',
+    date: date,
+    ouvertures: ouvertures,
+    clotures: clotures,
+    ticketsJour: ticketsJour,
+    totauxParMode: totauxParMode,
+    totalGeneralTickets: Math.round(totalGeneral * 100) / 100,
+    totalCompteCloture: Math.round(totalCompteCloture * 100) / 100,
+    totalFondOuverture: Math.round(totalFondOuverture * 100) / 100,
+    nbComptages: comptagesJour.length,
+    nbTickets: ticketsJour.length
   };
 }
 
@@ -1261,6 +1299,21 @@ function renderEcranHistorique() {
   const list = comptagesFiltres();
   const chipsCaisses = ['toutes', ...State.caisses];
 
+  const optionsCaissesRapport = State.caisses.map(c => `<option value="${c}">${c}</option>`).join('');
+
+  const carteRapport = `
+    <div class="card">
+      <div class="card-title">🖨️ Rapport journalier</div>
+      <label>Date</label>
+      <input type="text" value="${formatDate(State.rapportDate)}" readonly onclick="Hist.openRapportDatePicker()" style="background:#fafaf7;">
+      <button class="btn btn-primary" onclick="Hist.genererRapportGlobal()">📊 Rapport global (toutes caisses)</button>
+      <div class="divider-text" style="margin:14px 0 8px;">ou par caisse</div>
+      <select id="rapportCaisseSelect" style="margin-bottom:10px;">${optionsCaissesRapport}</select>
+      <button class="btn btn-secondary" onclick="Hist.genererRapportCaisse()">🖨️ Rapport de cette caisse</button>
+      <div class="helper-text" style="margin-top:8px; margin-bottom:0;">Le rapport inclut les ouvertures, clôtures, tickets et écarts du jour — pratique à imprimer et agrafer avec les tickets TPE papier.</div>
+    </div>
+  `;
+
   const chipsHtml = chipsCaisses.map(c => `
     <button class="filter-chip ${State.historyFilter.caisse===c?'active':''}" onclick="Hist.setFiltreCaisse('${c}')">
       ${c === 'toutes' ? 'Toutes les caisses' : c}
@@ -1272,6 +1325,7 @@ function renderEcranHistorique() {
 
   if (list.length === 0) {
     return `
+      ${carteRapport}
       <div class="filter-bar">${chipsHtml}</div>
       <div class="filter-bar">${chipsPeriode}</div>
       <div class="empty-state">
@@ -1300,6 +1354,7 @@ function renderEcranHistorique() {
   }).join('');
 
   return `
+    ${carteRapport}
     <div class="filter-bar">${chipsHtml}</div>
     <div class="filter-bar">${chipsPeriode}</div>
     <button class="btn btn-secondary" style="margin-bottom:14px;" onclick="Export.exporterExcel()">📊 Exporter en Excel (${list.length} comptage${list.length>1?'s':''})</button>
@@ -1310,6 +1365,32 @@ function renderEcranHistorique() {
 const Hist = {
   setFiltreCaisse(c) { State.historyFilter.caisse = c; Render.screen(); },
   setFiltrePeriode(p) { State.historyFilter.periode = p; Render.screen(); },
+
+  openRapportDatePicker() {
+    const input = document.createElement('input');
+    input.type = 'date';
+    input.value = State.rapportDate;
+    input.style.position = 'fixed';
+    input.style.top = '-100px';
+    document.body.appendChild(input);
+    input.addEventListener('change', () => {
+      State.rapportDate = input.value;
+      Render.screen();
+      document.body.removeChild(input);
+    });
+    input.click();
+    input.showPicker ? input.showPicker() : input.focus();
+  },
+
+  genererRapportGlobal() {
+    Export.exporterRapportJournalier(State.rapportDate, null);
+  },
+
+  genererRapportCaisse() {
+    const select = document.getElementById('rapportCaisseSelect');
+    const caisse = select ? select.value : State.caisses[0];
+    Export.exporterRapportJournalier(State.rapportDate, caisse);
+  },
 
   ouvrirDetail(id) {
     State.editingHistId = id;
@@ -1671,6 +1752,109 @@ const Reglages = {
    SECTION 12B — EXPORT EXCEL & PDF
    ================================================================ */
 const Export = {
+  // Génère le HTML d'un bloc "caisse" pour le rapport journalier — réutilisé
+  // aussi bien pour le rapport global (un bloc par caisse) que pour le
+  // rapport d'une caisse unique (un seul bloc).
+  _blocRapportCaisse(d) {
+    const ligneOuverture = d.ouvertures.map(c => `
+      <tr><td>Ouverture ${c.heure || ''} (${c.service})</td><td style="text-align:right;">${formatMontant(c.total)}</td></tr>
+    `).join('');
+
+    const ligneCloture = d.clotures.map(c => {
+      const statut = statutEcart(c.ecart, State.seuilEcartAlerte);
+      const ecartsAutres = MODES_PAIEMENT.filter(m => !m.compteEspeces).map(m => {
+        const ec = c[m.champEcart];
+        if (ec === null || ec === undefined) return '';
+        return `<tr><td style="padding-left:18px; font-size:12.5px; color:#6b6258;">Écart ${m.label}</td><td style="text-align:right; font-size:12.5px; color:${statutEcart(ec, State.seuilEcartAlerte)==='ok'?'#2d7d4f':'#b6402f'};">${formatMontantSigne(ec)}</td></tr>`;
+      }).join('');
+      return `
+        <tr><td>Clôture ${c.heure || ''} (${c.service})</td><td style="text-align:right;">${formatMontant(c.total)}</td></tr>
+        <tr><td style="padding-left:18px; font-size:12.5px; color:#6b6258;">Écart espèces</td><td style="text-align:right; font-size:12.5px; color:${statut==='ok'?'#2d7d4f':'#b6402f'};">${c.ecart!==null&&c.ecart!==undefined?formatMontantSigne(c.ecart):'—'}</td></tr>
+        ${ecartsAutres}
+      `;
+    }).join('');
+
+    const lignesModesTickets = MODES_PAIEMENT.filter(m => (d.totauxParMode[m.cle]||0) > 0).map(m => `
+      <tr><td>${m.icone} ${m.label}</td><td style="text-align:right;">${formatMontant(d.totauxParMode[m.cle])}</td></tr>
+    `).join('');
+
+    return `
+      <div style="margin-bottom:26px; padding-bottom:20px; border-bottom:2px dashed #c9bfa9;">
+        <h2 style="font-size:17px; color:#163f3e; margin-bottom:10px;">${d.caisse}</h2>
+
+        ${d.ouvertures.length === 0 && d.clotures.length === 0 ? `
+          <div style="font-size:13px; color:#6b6258; font-style:italic;">Aucun comptage enregistré ce jour pour cette caisse.</div>
+        ` : `
+          <table class="pdf-table">
+            ${ligneOuverture}
+            ${ligneCloture}
+          </table>
+        `}
+
+        ${d.nbTickets > 0 ? `
+          <div class="section-title" style="margin-top:14px;">Tickets saisis (${d.nbTickets})</div>
+          <table class="pdf-table">
+            ${lignesModesTickets}
+            <tr style="font-weight:700;"><td>TOTAL TICKETS</td><td style="text-align:right;">${formatMontant(d.totalGeneralTickets)}</td></tr>
+          </table>
+        ` : `<div class="helper-text" style="margin-top:10px;">Aucun ticket saisi ce jour pour cette caisse.</div>`}
+      </div>`;
+  },
+
+  exporterRapportJournalier(date, caisse) {
+    // caisse = null pour le rapport global (toutes caisses), ou un nom précis
+    const caissesAInclure = caisse ? [caisse] : State.caisses;
+    const blocs = caissesAInclure.map(c => this._blocRapportCaisse(donneesJourPour(date, c))).join('');
+
+    // Total général toutes caisses confondues (utile surtout en mode global)
+    const dGlobal = donneesJourPour(date, caisse || null);
+    const totalGlobalHtml = !caisse ? `
+      <div class="total-row"><span>TOTAL TICKETS — TOUTES CAISSES</span><span>${formatMontant(dGlobal.totalGeneralTickets)}</span></div>
+    ` : '';
+
+    const win = window.open('', '_blank');
+    win.document.write(`
+      <!DOCTYPE html>
+      <html lang="fr">
+      <head>
+      <meta charset="UTF-8">
+      <title>Rapport journalier — ${formatDate(date)}${caisse ? ' — ' + caisse : ''}</title>
+      <style>
+        body{font-family:Georgia,'Times New Roman',serif; color:#2A2521; padding:40px; max-width:680px; margin:0 auto;}
+        h1{font-size:22px; margin-bottom:2px; color:#163f3e;}
+        h2{font-family:'Georgia',serif;}
+        .sub{color:#6b6258; font-size:13px; margin-bottom:24px;}
+        table.pdf-table{width:100%; border-collapse:collapse; margin-bottom:8px;}
+        table.pdf-table td{padding:6px 4px; border-bottom:1px solid #e2d9c8; font-size:13.5px;}
+        .section-title{font-size:12px; text-transform:uppercase; letter-spacing:.6px; font-weight:700; color:#1F5C5A; margin:14px 0 6px; border-bottom:2px solid #1F5C5A; padding-bottom:4px;}
+        .total-row{display:flex; justify-content:space-between; padding:12px 0; border-top:2px solid #163f3e; border-bottom:2px solid #163f3e; font-weight:700; font-size:17px; margin-top:14px;}
+        .meta{display:flex; justify-content:space-between; font-size:12px; color:#6b6258; margin-top:20px; border-top:1px solid #e2d9c8; padding-top:10px;}
+        .zone-agrafe{margin-top:30px; padding:30px; border:2px dashed #c9bfa9; border-radius:8px; text-align:center; color:#a89c84; font-size:13px;}
+        .helper-text{font-size:12.5px; color:#6b6258;}
+        @media print{ body{padding:15mm;} .zone-agrafe{page-break-inside:avoid;} }
+      </style>
+      </head>
+      <body>
+        <h1>🦪 La Marmite Bleue — Rapport journalier</h1>
+        <div class="sub">${formatDate(date)} — ${caisse ? caisse : 'Toutes les caisses'}</div>
+
+        ${blocs}
+        ${totalGlobalHtml}
+
+        <div class="zone-agrafe">📎 Agrafer ici les tickets TPE / relevés de caisse papier de la journée</div>
+
+        <div class="meta">
+          <span>Document généré le ${formatDateHeure(Date.now())} par ${State.employeActif ? State.employeActif.nom : '—'}</span>
+          <span>La Marmite Bleue</span>
+        </div>
+
+        <script>window.onload = function(){ window.print(); };</script>
+      </body>
+      </html>
+    `);
+    win.document.close();
+  },
+
   exporterRecuPetiteCaisse(id) {
     const s = State.petiteCaisse.find(x => x.id === id);
     if (!s) { toast("Sortie introuvable", true); return; }
