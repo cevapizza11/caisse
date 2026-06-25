@@ -128,6 +128,7 @@ function nouveauDraft() {
     caTheoriqueCQ: null,   // relevé chèque "classique"
     fondDeCaisse: 0,       // montant de départ en caisse, pour calcul écart sur clôture
     commentaire: "",
+    forcerOuverture: false, // permet à un admin de contourner le blocage d'ouverture en doublon
     createdAt: null
   };
 }
@@ -200,6 +201,19 @@ function totauxTicketsPour(caisse, service, date) {
 // Agrège toutes les données (comptages, tickets) d'une date donnée, pour une
 // caisse précise ou pour toutes les caisses confondues (caisse = null).
 // Utilisé pour générer le rapport journalier (global ou par caisse).
+// Détermine si une caisse a actuellement une ouverture "active" (= une
+// ouverture enregistrée à laquelle aucune clôture postérieure n'a encore
+// répondu). Tant que c'est le cas, on bloque une nouvelle ouverture pour
+// cette caisse — il faut d'abord clôturer le cycle en cours.
+function caisseADejaOuvertureActive(caisse, idAExclure) {
+  const comptagesCaisse = State.comptages
+    .filter(c => c.caisse === caisse && c.id !== idAExclure)
+    .sort((a,b) => (a.createdAt||0) - (b.createdAt||0));
+  if (comptagesCaisse.length === 0) return null;
+  const dernier = comptagesCaisse[comptagesCaisse.length - 1];
+  return dernier.type === 'fond' ? dernier : null;
+}
+
 function donneesJourPour(date, caisse) {
   const filtreCaisse = (x) => caisse ? x.caisse === caisse : true;
 
@@ -853,6 +867,8 @@ function renderEcranNouveau() {
   const d = State.draft;
   const total = calculTotalDraft(d);
   const totauxTickets = totauxTicketsPour(d.caisse, d.service, d.date);
+  const ouvertureActive = d.type === 'fond' ? caisseADejaOuvertureActive(d.caisse, d.id) : null;
+  const ouvertureBloquee = !!ouvertureActive && !d.forcerOuverture;
 
   // Si le CA théorique espèces n'a pas été saisi manuellement, on propose
   // automatiquement le total des tickets espèces enregistrés pour ce contexte.
@@ -895,6 +911,20 @@ function renderEcranNouveau() {
         </div>
       </div>
     </div>
+
+    ${ouvertureActive ? `
+    <div class="ecart-box ${d.forcerOuverture ? 'warn' : 'bad'}">
+      <span class="lbl" style="line-height:1.4;">
+        ⚠ ${d.caisse} a déjà une ouverture en cours (${formatDateHeure(ouvertureActive.createdAt || Date.now())}${ouvertureActive.employe ? ', par ' + ouvertureActive.employe : ''}) sans clôture associée.
+        ${estAdmin() ? "Clôture-la d'abord, ou force une nouvelle ouverture ci-dessous." : "Demande à un administrateur de clôturer cette ouverture, ou de forcer une nouvelle ouverture."}
+      </span>
+    </div>
+    ${estAdmin() ? `
+      <button class="btn ${d.forcerOuverture ? 'btn-primary' : 'btn-ghost'}" style="margin-top:-4px; margin-bottom:14px;" onclick="Draft.toggleForcerOuverture()">
+        ${d.forcerOuverture ? '✓ Ouverture forcée — décocher' : '🔓 Forcer une nouvelle ouverture malgré tout'}
+      </button>
+    ` : ''}
+    ` : ''}
 
     ${d.type === 'cloture' ? `
     <div class="card">
@@ -978,7 +1008,7 @@ function renderEcranNouveau() {
       <textarea placeholder="Ex : billet déchiré mis de côté, erreur de rendu monnaie..." onchange="Draft.setField('commentaire', this.value)">${d.commentaire || ''}</textarea>
     </div>
 
-    <button class="btn btn-primary" onclick="Draft.enregistrer()">💾 Enregistrer le comptage</button>
+    <button class="btn btn-primary" ${ouvertureBloquee ? 'disabled' : ''} onclick="Draft.enregistrer()">💾 Enregistrer le comptage</button>
     <div class="section-gap"></div>
   `;
 }
@@ -994,12 +1024,19 @@ const Draft = {
       State.draft.fondDeCaisse = parseFloat(value) || 0;
     } else {
       State.draft[field] = value;
+      if (field === 'caisse') State.draft.forcerOuverture = false;
     }
     Render.screen();
   },
 
   setType(type) {
     State.draft.type = type;
+    State.draft.forcerOuverture = false; // on réinitialise le forçage à chaque changement de type
+    Render.screen();
+  },
+
+  toggleForcerOuverture() {
+    State.draft.forcerOuverture = !State.draft.forcerOuverture;
     Render.screen();
   },
 
@@ -1040,6 +1077,15 @@ const Draft = {
     if (total === 0) {
       toast("Le total est à 0 € — vérifie ta saisie avant d'enregistrer", true);
       return;
+    }
+    // Empêche d'ouvrir une caisse qui a déjà une ouverture active (sans
+    // clôture associée), sauf si un admin a explicitement coché "forcer".
+    if (d.type === 'fond') {
+      const ouvertureActive = caisseADejaOuvertureActive(d.caisse, d.id);
+      if (ouvertureActive && !d.forcerOuverture) {
+        toast(d.caisse + " a déjà une ouverture en cours — clôture-la d'abord ou demande à un administrateur de forcer", true);
+        return;
+      }
     }
     // Si le CA théorique espèces n'a pas été saisi à la main, on fige la valeur
     // automatique issue des tickets au moment de l'enregistrement, pour que
@@ -1557,6 +1603,7 @@ const Hist = {
       caTheoriqueCQ: c.caTheoriqueCQ,
       fondDeCaisse: c.fondDeCaisse || 0,
       commentaire: c.commentaire || "",
+      forcerOuverture: false,
       createdAt: c.createdAt
     };
     Nav.go('nouveau');
