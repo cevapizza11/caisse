@@ -205,9 +205,17 @@ function totauxTicketsPour(caisse, service, date) {
 // ouverture enregistrée à laquelle aucune clôture postérieure n'a encore
 // répondu). Tant que c'est le cas, on bloque une nouvelle ouverture pour
 // cette caisse — il faut d'abord clôturer le cycle en cours.
+// Normalise un nom de caisse (espaces superflus + casse) pour comparer de
+// façon fiable même si une faute de frappe a glissé un espace ou une
+// majuscule différente lors d'une saisie manuelle.
+function normaliserNomCaisse(nom) {
+  return (nom || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
 function caisseADejaOuvertureActive(caisse, idAExclure) {
+  const cibleNormalisee = normaliserNomCaisse(caisse);
   const comptagesCaisse = State.comptages
-    .filter(c => c.caisse === caisse && c.id !== idAExclure)
+    .filter(c => normaliserNomCaisse(c.caisse) === cibleNormalisee && c.id !== idAExclure)
     .sort((a,b) => (a.createdAt||0) - (b.createdAt||0));
   if (comptagesCaisse.length === 0) return null;
   const dernier = comptagesCaisse[comptagesCaisse.length - 1];
@@ -215,7 +223,7 @@ function caisseADejaOuvertureActive(caisse, idAExclure) {
 }
 
 function donneesJourPour(date, caisse) {
-  const filtreCaisse = (x) => caisse ? x.caisse === caisse : true;
+  const filtreCaisse = (x) => caisse ? normaliserNomCaisse(x.caisse) === normaliserNomCaisse(caisse) : true;
 
   const comptagesJour = State.comptages.filter(c => c.date === date && filtreCaisse(c));
   const ouvertures = comptagesJour.filter(c => c.type === 'fond').sort((a,b) => (a.createdAt||0)-(b.createdAt||0));
