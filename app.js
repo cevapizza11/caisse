@@ -42,6 +42,20 @@ const EMPLOYES_DOC = "config/employes";
 const BILLETS = [500, 200, 100, 50, 20, 10, 5];
 const PIECES  = [2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01];
 
+// Liste centrale des modes de paiement gérés par l'app. Toute la logique
+// (saisie tickets, rapprochement, écarts, exports) s'appuie sur cette liste
+// plutôt que de coder chaque mode en dur, pour faciliter l'ajout futur.
+const MODES_PAIEMENT = [
+  { cle: 'especes',        label: 'Espèces',          icone: '💶', champTheorique: 'caTheorique',   champEcart: 'ecart',   compteEspeces: true },
+  { cle: 'cb',              label: 'CB',                icone: '💳', champTheorique: 'caTheoriqueCB', champEcart: 'ecartCB', compteEspeces: false },
+  { cle: 'titrerestaurant', label: 'Titre-restaurant', icone: '🍽️', champTheorique: 'caTheoriqueTR', champEcart: 'ecartTR', compteEspeces: false },
+  { cle: 'chequevacances',  label: 'Chèque-vacances',  icone: '🏖️', champTheorique: 'caTheoriqueCV', champEcart: 'ecartCV', compteEspeces: false },
+  { cle: 'cheque',          label: 'Chèque',            icone: '📝', champTheorique: 'caTheoriqueCQ', champEcart: 'ecartCQ', compteEspeces: false }
+];
+function modeInfo(cle) {
+  return MODES_PAIEMENT.find(m => m.cle === cle) || MODES_PAIEMENT[0];
+}
+
 function formatMontant(n) {
   if (isNaN(n)) n = 0;
   return n.toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " €";
@@ -98,6 +112,9 @@ function nouveauDraft() {
     denomQte: denomQte,
     caTheorique: null,     // CA théorique espèces — auto-rempli depuis les tickets si dispo, sinon saisi manuellement
     caTheoriqueCB: null,   // relevé du terminal CB, saisi manuellement (l'app ne peut pas le connaître)
+    caTheoriqueTR: null,   // relevé titre-restaurant (bordereau de remise)
+    caTheoriqueCV: null,   // relevé chèque-vacances
+    caTheoriqueCQ: null,   // relevé chèque "classique"
     fondDeCaisse: 0,       // montant de départ en caisse, pour calcul écart sur clôture
     commentaire: "",
     createdAt: null
@@ -121,22 +138,37 @@ function calculEcart(draft) {
   return Math.round((totalCompte - especesAttendues) * 100) / 100;
 }
 
+// Calcule l'écart de rapprochement pour un mode de paiement non-espèces
+// (CB, titre-restaurant, chèque-vacances, chèque) : relevé externe saisi
+// manuellement (TPE, bordereau...) moins le total des tickets de ce mode.
+function calculEcartMode(draft, modeCle) {
+  const info = modeInfo(modeCle);
+  const valeurRelevee = draft[info.champTheorique];
+  if (valeurRelevee === null || valeurRelevee === undefined || valeurRelevee === "") return null;
+  const totalTickets = totauxTicketsPour(draft.caisse, draft.service, draft.date)[modeCle] || 0;
+  return Math.round((parseFloat(valeurRelevee) - totalTickets) * 100) / 100;
+}
+// Alias conservé pour compatibilité avec le code existant
 function calculEcartCB(draft) {
-  if (draft.caTheoriqueCB === null || draft.caTheoriqueCB === undefined || draft.caTheoriqueCB === "") return null;
-  const totalTicketsCB = totauxTicketsPour(draft.caisse, draft.service, draft.date).cb;
-  return Math.round((parseFloat(draft.caTheoriqueCB) - totalTicketsCB) * 100) / 100;
+  return calculEcartMode(draft, 'cb');
 }
 
 // Agrège tous les tickets correspondant à une caisse/service/date donnés,
 // et retourne le total par mode de paiement.
 function totauxTicketsPour(caisse, service, date) {
   const tickets = State.tickets.filter(t => t.caisse === caisse && t.service === service && t.date === date);
-  const especes = tickets.reduce((s, t) => s + (t.mode === 'especes' ? t.montant : 0), 0);
-  const cb = tickets.reduce((s, t) => s + (t.mode === 'cb' ? t.montant : 0), 0);
+  const parMode = {};
+  let total = 0;
+  MODES_PAIEMENT.forEach(m => {
+    const somme = tickets.reduce((s, t) => s + (t.mode === m.cle ? t.montant : 0), 0);
+    parMode[m.cle] = Math.round(somme * 100) / 100;
+    total += somme;
+  });
   return {
-    especes: Math.round(especes * 100) / 100,
-    cb: Math.round(cb * 100) / 100,
-    total: Math.round((especes + cb) * 100) / 100,
+    ...parMode,                 // ex: { especes: 120.5, cb: 89.3, titrerestaurant: 0, ... }
+    especes: parMode.especes,   // alias explicites conservés pour rétrocompatibilité du code existant
+    cb: parMode.cb,
+    total: Math.round(total * 100) / 100,
     nbTickets: tickets.length
   };
 }
@@ -378,7 +410,10 @@ const Sync = {
     try {
       const total = calculTotalDraft(draft);
       const ecart = calculEcart(draft);
-      const ecartCB = calculEcartCB(draft);
+      const ecartCB = calculEcartMode(draft, 'cb');
+      const ecartTR = calculEcartMode(draft, 'titrerestaurant');
+      const ecartCV = calculEcartMode(draft, 'chequevacances');
+      const ecartCQ = calculEcartMode(draft, 'cheque');
       const payload = {
         date: draft.date,
         heure: draft.heure,
@@ -389,11 +424,17 @@ const Sync = {
         denomQte: draft.denomQte,
         caTheorique: draft.caTheorique === "" ? null : draft.caTheorique,
         caTheoriqueCB: draft.caTheoriqueCB === "" ? null : draft.caTheoriqueCB,
+        caTheoriqueTR: draft.caTheoriqueTR === "" ? null : draft.caTheoriqueTR,
+        caTheoriqueCV: draft.caTheoriqueCV === "" ? null : draft.caTheoriqueCV,
+        caTheoriqueCQ: draft.caTheoriqueCQ === "" ? null : draft.caTheoriqueCQ,
         fondDeCaisse: parseFloat(draft.fondDeCaisse) || 0,
         commentaire: draft.commentaire || "",
         total: total,
         ecart: ecart,
         ecartCB: ecartCB,
+        ecartTR: ecartTR,
+        ecartCV: ecartCV,
+        ecartCQ: ecartCQ,
         createdAt: draft.createdAt || Date.now()
       };
       if (draft.id) {
@@ -582,8 +623,6 @@ function renderEcranNouveau() {
   const draftPourCalcul = { ...d, caTheorique: caTheoriqueEffectif };
   const ecart = calculEcart(draftPourCalcul);
   const statut = statutEcart(ecart, State.seuilEcartAlerte);
-  const ecartCB = calculEcartCB(d);
-  const statutCB = statutEcart(ecartCB, State.seuilEcartAlerte);
 
   const optionsCaisses = State.caisses.map(c => `<option value="${c}" ${c===d.caisse?'selected':''}>${c}</option>`).join('');
   const optionsServices = State.services.map(s => `<option value="${s}" ${s===d.service?'selected':''}>${s}</option>`).join('');
@@ -624,25 +663,22 @@ function renderEcranNouveau() {
       ${totauxTickets.nbTickets === 0 ? `
         <div class="helper-text" style="margin-bottom:0;">Aucun ticket saisi pour cette caisse/service/date. Va dans l'onglet 🧾 Tickets pour les enregistrer au fur et à mesure du service, ou saisis le CA théorique manuellement ci-dessous.</div>
       ` : `
-        <div class="grid-2">
-          <div>
-            <div class="helper-text" style="margin-bottom:2px;">Espèces (${totauxTickets.nbTickets} ticket${totauxTickets.nbTickets>1?'s':''})</div>
-            <div style="font-family:'Cormorant',serif; font-size:22px; font-weight:700; color:var(--teal-dark);">${formatMontant(totauxTickets.especes)}</div>
-          </div>
-          <div>
-            <div class="helper-text" style="margin-bottom:2px;">CB</div>
-            <div style="font-family:'Cormorant',serif; font-size:22px; font-weight:700; color:var(--terracotta);">${formatMontant(totauxTickets.cb)}</div>
-          </div>
+        <div class="modes-totaux-grid">
+          ${MODES_PAIEMENT.filter(m => (totauxTickets[m.cle] || 0) > 0).map(m => `
+            <div>
+              <div class="helper-text" style="margin-bottom:2px;">${m.icone} ${m.label}</div>
+              <div style="font-family:'Cormorant',serif; font-size:20px; font-weight:700; color:var(--ink);">${formatMontant(totauxTickets[m.cle])}</div>
+            </div>`).join('')}
         </div>
         <div style="margin-top:14px; padding-top:14px; border-top:1px solid var(--border); display:flex; align-items:center; justify-content:space-between;">
-          <span class="helper-text" style="margin-bottom:0; font-weight:700; text-transform:uppercase; letter-spacing:.5px;">CA réalisé (total)</span>
+          <span class="helper-text" style="margin-bottom:0; font-weight:700; text-transform:uppercase; letter-spacing:.5px;">CA réalisé (total, ${totauxTickets.nbTickets} ticket${totauxTickets.nbTickets>1?'s':''})</span>
           <span style="font-family:'Cormorant',serif; font-size:26px; font-weight:700; color:var(--ink);">${formatMontant(totauxTickets.total)}</span>
         </div>
       `}
     </div>
 
     <div class="card">
-      <div class="card-title">Rapprochement</div>
+      <div class="card-title">Rapprochement espèces</div>
       <label>Fond de caisse de départ (€)</label>
       <input type="number" inputmode="decimal" step="0.01" value="${d.fondDeCaisse || ''}"
              placeholder="0,00"
@@ -652,12 +688,18 @@ function renderEcranNouveau() {
              placeholder="${totauxTickets.nbTickets > 0 ? 'Auto : ' + formatMontant(totauxTickets.especes) + ' (depuis les tickets)' : 'Laisser vide si pas de rapprochement'}"
              onchange="Draft.setField('caTheorique', this.value)">
       <div class="helper-text">${totauxTickets.nbTickets > 0 && (d.caTheorique === null || d.caTheorique === undefined || d.caTheorique === '') ? 'Pré-rempli automatiquement depuis les tickets espèces — modifie si besoin.' : 'Écart espèces = Total compté − (Fond de caisse + CA théorique espèces)'}</div>
+    </div>
 
-      <label>Relevé terminal CB (€)</label>
-      <input type="number" inputmode="decimal" step="0.01" value="${d.caTheoriqueCB === null ? '' : d.caTheoriqueCB}"
-             placeholder="Montant indiqué par le TPE en fin de service"
-             onchange="Draft.setField('caTheoriqueCB', this.value)">
-      <div class="helper-text">Écart CB = Relevé terminal − Total des tickets CB saisis (${formatMontant(totauxTickets.cb)})</div>
+    <div class="card">
+      <div class="card-title">Rapprochement des autres moyens de paiement</div>
+      <div class="helper-text" style="margin-top:-6px;">Saisis le relevé externe de chaque moyen de paiement (terminal CB, bordereau de remise titres-restaurant/chèques-vacances, etc.) pour comparer avec les tickets enregistrés.</div>
+      ${MODES_PAIEMENT.filter(m => !m.compteEspeces).map(m => `
+        <label style="margin-top:14px; display:block;">${m.icone} Relevé ${m.label} (€)</label>
+        <input type="number" inputmode="decimal" step="0.01" value="${d[m.champTheorique] === null || d[m.champTheorique] === undefined ? '' : d[m.champTheorique]}"
+               placeholder="Montant relevé pour ${m.label}"
+               onchange="Draft.setField('${m.champTheorique}', this.value)">
+        <div class="helper-text">Écart ${m.label} = Relevé − Total tickets ${m.label} (${formatMontant(totauxTickets[m.cle] || 0)})</div>
+      `).join('')}
     </div>` : ''}
 
     <div class="card">
@@ -681,11 +723,16 @@ function renderEcranNouveau() {
       <span class="val">${formatMontantSigne(ecart)}</span>
     </div>` : ''}
 
-    ${ecartCB !== null ? `
-    <div class="ecart-box ${statutCB}">
-      <span class="lbl">${statutCB==='ok' ? '✓ CB juste' : statutCB==='warn' ? '⚠ Petit écart CB' : '⚠ Écart CB important'}</span>
-      <span class="val">${formatMontantSigne(ecartCB)}</span>
-    </div>` : ''}
+    ${MODES_PAIEMENT.filter(m => !m.compteEspeces).map(m => {
+      const ec = calculEcartMode(d, m.cle);
+      if (ec === null) return '';
+      const st = statutEcart(ec, State.seuilEcartAlerte);
+      return `
+    <div class="ecart-box ${st}">
+      <span class="lbl">${st==='ok' ? '✓ '+m.label+' juste' : st==='warn' ? '⚠ Petit écart '+m.label : '⚠ Écart '+m.label+' important'}</span>
+      <span class="val">${formatMontantSigne(ec)}</span>
+    </div>`;
+    }).join('')}
 
     <div class="card">
       <label>Commentaire (optionnel)</label>
@@ -804,17 +851,20 @@ function renderEcranTickets() {
   const ticketsHtml = ticketsJour.length === 0 ? `
     <div class="empty-state" style="padding:24px;">
       <p>Aucun ticket saisi pour ce service.</p>
-    </div>` : ticketsJour.map(t => `
+    </div>` : ticketsJour.map(t => {
+      const info = modeInfo(t.mode);
+      return `
       <div class="hist-item" style="cursor:default;">
         <div class="hist-main">
-          <div class="hist-titre">${t.mode === 'especes' ? '💶 Espèces' : '💳 CB'}</div>
+          <div class="hist-titre">${info.icone} ${info.label}</div>
           <div class="hist-meta">${t.heure || ''}${t.employe ? ' · ' + t.employe : ''}</div>
         </div>
         <div class="hist-right" style="display:flex; align-items:center; gap:10px;">
           <div class="hist-montant">${formatMontant(t.montant)}</div>
           <button class="btn-icon" style="background:var(--ivoire-dark); color:var(--ecart-bad);" onclick="Tickets.supprimer('${t.id}')">✕</button>
         </div>
-      </div>`).join('');
+      </div>`;
+    }).join('');
 
   return `
     <div class="card">
@@ -837,20 +887,16 @@ function renderEcranTickets() {
       <div class="card-title" style="justify-content:center;">Montant du ticket</div>
       <div style="font-family:'Cormorant',serif; font-size:42px; font-weight:700; color:var(--teal-dark); margin:8px 0 18px;">${montantAffiche} €</div>
       <div class="pin-pad" style="margin:0 auto 18px;">${pad}</div>
-      <div class="btn-full-row">
-        <button class="btn btn-primary" style="background:var(--teal-dark);" onclick="Tickets.enregistrer('especes')">💶 Espèces</button>
-        <button class="btn btn-primary" onclick="Tickets.enregistrer('cb')">💳 CB</button>
+      <div class="mode-paiement-grid">
+        ${MODES_PAIEMENT.map(m => `<button class="btn btn-mode-paiement" onclick="Tickets.enregistrer('${m.cle}')">${m.icone} ${m.label}</button>`).join('')}
       </div>
     </div>
 
-    <div class="total-banner">
-      <span class="lbl">Total espèces</span>
-      <span class="val">${formatMontant(totaux.especes)}</span>
-    </div>
-    <div class="total-banner" style="background:var(--terracotta-dark);">
-      <span class="lbl">Total CB</span>
-      <span class="val">${formatMontant(totaux.cb)}</span>
-    </div>
+    ${MODES_PAIEMENT.map((m, i) => `
+    <div class="total-banner" style="background:${['var(--teal-dark)','var(--terracotta-dark)','#6b5b95','#2d8659','#8a5a44'][i % 5]};">
+      <span class="lbl">Total ${m.label}</span>
+      <span class="val">${formatMontant(totaux[m.cle] || 0)}</span>
+    </div>`).join('')}
     <div class="total-banner" style="background:var(--ink);">
       <span class="lbl">CA réalisé (total)</span>
       <span class="val">${formatMontant(totaux.total)}</span>
@@ -915,7 +961,7 @@ const Tickets = {
     };
     const ok = await Sync.sauvegarderTicket(ticket);
     if (ok) {
-      toast((mode === 'especes' ? 'Espèces' : 'CB') + " — " + formatMontant(montant) + " enregistré");
+      toast(modeInfo(mode).label + " — " + formatMontant(montant) + " enregistré");
       State.ticketMontantSaisie = "";
       Render.screen();
     }
@@ -1030,6 +1076,10 @@ const Hist = {
       employe: c.employe || (State.employeActif ? State.employeActif.nom : ""),
       denomQte: c.denomQte ? { ...c.denomQte } : nouveauDraft().denomQte,
       caTheorique: c.caTheorique,
+      caTheoriqueCB: c.caTheoriqueCB,
+      caTheoriqueTR: c.caTheoriqueTR,
+      caTheoriqueCV: c.caTheoriqueCV,
+      caTheoriqueCQ: c.caTheoriqueCQ,
       fondDeCaisse: c.fondDeCaisse || 0,
       commentaire: c.commentaire || "",
       createdAt: c.createdAt
@@ -1086,11 +1136,15 @@ function renderDetailModal() {
         <span class="val">${formatMontantSigne(c.ecart)}</span>
       </div>` : ''}
 
-      ${c.ecartCB !== null && c.ecartCB !== undefined ? `
-      <div class="ecart-box ${statutEcart(c.ecartCB, State.seuilEcartAlerte)}" style="margin-top:8px;">
-        <span class="lbl">Écart CB (relevé ${formatMontant(c.caTheoriqueCB||0)})</span>
-        <span class="val">${formatMontantSigne(c.ecartCB)}</span>
-      </div>` : ''}
+      ${MODES_PAIEMENT.filter(m => !m.compteEspeces).map(m => {
+        const ec = c[m.champEcart];
+        if (ec === null || ec === undefined) return '';
+        return `
+      <div class="ecart-box ${statutEcart(ec, State.seuilEcartAlerte)}" style="margin-top:8px;">
+        <span class="lbl">Écart ${m.label} (relevé ${formatMontant(c[m.champTheorique]||0)})</span>
+        <span class="val">${formatMontantSigne(ec)}</span>
+      </div>`;
+      }).join('')}
 
       ${c.commentaire ? `<div class="card" style="margin-top:14px;"><label>Commentaire</label><div>${c.commentaire}</div></div>` : ''}
 
@@ -1360,27 +1414,28 @@ const Export = {
     if (list.length === 0) { toast("Rien à exporter pour ces filtres", true); return; }
     if (typeof XLSX === 'undefined') { toast("Module Excel indisponible (vérifie ta connexion)", true); return; }
 
-    const rows = list.map(c => ({
-      "Date": formatDate(c.date),
-      "Heure": c.heure || "",
-      "Caisse": c.caisse,
-      "Type": c.type === 'fond' ? 'Ouverture' : 'Clôture',
-      "Service": c.service,
-      "Compté par": c.employe || "",
-      "Fond de caisse (€)": c.fondDeCaisse || 0,
-      "CA théorique espèces (€)": c.caTheorique === null || c.caTheorique === undefined ? "" : c.caTheorique,
-      "Relevé terminal CB (€)": c.caTheoriqueCB === null || c.caTheoriqueCB === undefined ? "" : c.caTheoriqueCB,
-      "Total compté (€)": c.total,
-      "Écart espèces (€)": c.ecart === null || c.ecart === undefined ? "" : c.ecart,
-      "Écart CB (€)": c.ecartCB === null || c.ecartCB === undefined ? "" : c.ecartCB,
-      "Commentaire": c.commentaire || ""
-    }));
+    const rows = list.map(c => {
+      const row = {
+        "Date": formatDate(c.date),
+        "Heure": c.heure || "",
+        "Caisse": c.caisse,
+        "Type": c.type === 'fond' ? 'Ouverture' : 'Clôture',
+        "Service": c.service,
+        "Compté par": c.employe || "",
+        "Fond de caisse (€)": c.fondDeCaisse || 0,
+        "CA théorique espèces (€)": c.caTheorique === null || c.caTheorique === undefined ? "" : c.caTheorique,
+        "Total compté (€)": c.total,
+        "Écart espèces (€)": c.ecart === null || c.ecart === undefined ? "" : c.ecart
+      };
+      MODES_PAIEMENT.filter(m => !m.compteEspeces).forEach(m => {
+        row["Relevé " + m.label + " (€)"] = c[m.champTheorique] === null || c[m.champTheorique] === undefined ? "" : c[m.champTheorique];
+        row["Écart " + m.label + " (€)"] = c[m.champEcart] === null || c[m.champEcart] === undefined ? "" : c[m.champEcart];
+      });
+      row["Commentaire"] = c.commentaire || "";
+      return row;
+    });
 
     const ws = XLSX.utils.json_to_sheet(rows);
-    ws['!cols'] = [
-      {wch:11},{wch:7},{wch:14},{wch:10},{wch:16},{wch:16},
-      {wch:16},{wch:18},{wch:16},{wch:15},{wch:14},{wch:12},{wch:30}
-    ];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Comptages");
 
@@ -1399,7 +1454,7 @@ const Export = {
           "Heure": t.heure || "",
           "Caisse": t.caisse,
           "Service": t.service,
-          "Mode": t.mode === 'especes' ? 'Espèces' : 'CB',
+          "Mode": modeInfo(t.mode).label,
           "Montant (€)": t.montant,
           "Saisi par": t.employe || ""
         }));
@@ -1441,13 +1496,18 @@ const Export = {
         </tr>
       </table>` : '';
 
-    const ecartCBHtml = (c.ecartCB !== null && c.ecartCB !== undefined) ? `
+    const ecartCBHtml = MODES_PAIEMENT.filter(m => !m.compteEspeces).map(m => {
+      const ec = c[m.champEcart];
+      if (ec === null || ec === undefined) return '';
+      const st = statutEcart(ec, State.seuilEcartAlerte);
+      return `
       <table class="pdf-table" style="margin-top:10px;">
-        <tr><td>Relevé terminal CB</td><td style="text-align:right;">${formatMontant(c.caTheoriqueCB||0)}</td></tr>
-        <tr style="font-weight:700; color:${statutEcart(c.ecartCB, State.seuilEcartAlerte)==='ok'?'#2d7d4f':statutEcart(c.ecartCB, State.seuilEcartAlerte)==='warn'?'#c19a2e':'#b6402f'};">
-          <td>ÉCART CB</td><td style="text-align:right;">${formatMontantSigne(c.ecartCB)}</td>
+        <tr><td>Relevé ${m.label}</td><td style="text-align:right;">${formatMontant(c[m.champTheorique]||0)}</td></tr>
+        <tr style="font-weight:700; color:${st==='ok'?'#2d7d4f':st==='warn'?'#c19a2e':'#b6402f'};">
+          <td>ÉCART ${m.label.toUpperCase()}</td><td style="text-align:right;">${formatMontantSigne(ec)}</td>
         </tr>
-      </table>` : '';
+      </table>`;
+    }).join('');
 
     const commentaireHtml = c.commentaire ? `
       <div style="margin-top:16px; padding:12px; background:#f7f2ea; border-radius:8px; font-size:13px;">
