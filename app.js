@@ -634,6 +634,10 @@ function renderEcranNouveau() {
             <div style="font-family:'Cormorant',serif; font-size:22px; font-weight:700; color:var(--terracotta);">${formatMontant(totauxTickets.cb)}</div>
           </div>
         </div>
+        <div style="margin-top:14px; padding-top:14px; border-top:1px solid var(--border); display:flex; align-items:center; justify-content:space-between;">
+          <span class="helper-text" style="margin-bottom:0; font-weight:700; text-transform:uppercase; letter-spacing:.5px;">CA réalisé (total)</span>
+          <span style="font-family:'Cormorant',serif; font-size:26px; font-weight:700; color:var(--ink);">${formatMontant(totauxTickets.total)}</span>
+        </div>
       `}
     </div>
 
@@ -846,6 +850,10 @@ function renderEcranTickets() {
     <div class="total-banner" style="background:var(--terracotta-dark);">
       <span class="lbl">Total CB</span>
       <span class="val">${formatMontant(totaux.cb)}</span>
+    </div>
+    <div class="total-banner" style="background:var(--ink);">
+      <span class="lbl">CA réalisé (total)</span>
+      <span class="val">${formatMontant(totaux.total)}</span>
     </div>
 
     <div class="divider-text">Tickets du service (${ticketsJour.length})</div>
