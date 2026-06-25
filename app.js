@@ -33,14 +33,15 @@ try {
 
 const COLLECTION = "comptages";
 const TICKETS_COLLECTION = "tickets";
+const PETITE_CAISSE_COLLECTION = "petiteCaisse";
 const CAISSES_DOC = "config/caisses";
 const EMPLOYES_DOC = "config/employes";
 
 /* ================================================================
    SECTION 2 — DÉNOMINATIONS (billets / pièces EUR)
    ================================================================ */
-const BILLETS = [50, 20, 10, 5];
-const PIECES  = [2, 1, 0.5, 0.2, 0.1, 0.05];
+const BILLETS = [500, 200, 100, 50, 20, 10, 5];
+const PIECES  = [2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01];
 
 // Liste centrale des modes de paiement gérés par l'app. Toute la logique
 // (saisie tickets, rapprochement, écarts, exports) s'appuie sur cette liste
@@ -87,12 +88,15 @@ const State = {
   employeActif: null,   // {nom} de la personne connectée sur cet appareil
   comptages: [],       // chargés depuis Firestore
   tickets: [],          // chargés depuis Firestore (tickets de vente)
+  petiteCaisse: [],      // chargés depuis Firestore (sorties d'argent petite caisse)
   historyFilter: { caisse: 'toutes', periode: '30j' },
   draft: null,         // comptage en cours de saisie
   editingHistId: null,
   seuilEcartAlerte: 5,  // € — au-delà, écart affiché en rouge
   ticketContexte: null, // {caisse, service, date} sélectionné sur l'écran Tickets
-  ticketMontantSaisie: "" // montant en cours de frappe sur le pavé numérique tickets
+  ticketMontantSaisie: "", // montant en cours de frappe sur le pavé numérique tickets
+  petiteCaisseDraft: null, // sortie de petite caisse en cours de saisie
+  petiteCaisseFiltrePeriode: '30j'
 };
 
 const SESSION_KEY = 'caisseMarmiteEmployeActif';
@@ -117,6 +121,19 @@ function nouveauDraft() {
     caTheoriqueCQ: null,   // relevé chèque "classique"
     fondDeCaisse: 0,       // montant de départ en caisse, pour calcul écart sur clôture
     commentaire: "",
+    createdAt: null
+  };
+}
+
+function nouveauPetiteCaisseDraft() {
+  return {
+    id: null,
+    date: new Date().toISOString().slice(0,10),
+    heure: new Date().toTimeString().slice(0,5),
+    montant: "",
+    motif: "",
+    employe: State.employeActif ? State.employeActif.nom : "",
+    justificatifBase64: null, // photo du ticket de caisse magasin, compressée en base64
     createdAt: null
   };
 }
@@ -208,6 +225,9 @@ const Nav = {
         date: new Date().toISOString().slice(0,10)
       };
     }
+    if (screen === 'petitecaisse' && !State.petiteCaisseDraft) {
+      State.petiteCaisseDraft = nouveauPetiteCaisseDraft();
+    }
     State.currentScreen = screen;
     State.editingHistId = null;
     this.updateActiveTab(screen);
@@ -216,7 +236,7 @@ const Nav = {
     window.scrollTo(0,0);
   },
   updateActiveTab(screen) {
-    ['nouveau','tickets','historique','stats','reglages'].forEach(s => {
+    ['nouveau','tickets','petitecaisse','historique','stats','reglages'].forEach(s => {
       const el = document.getElementById('nav' + s.charAt(0).toUpperCase() + s.slice(1));
       if (el) el.classList.toggle('active', s === screen);
     });
@@ -515,6 +535,63 @@ const Sync = {
       return true;
     } catch (e) {
       console.error("Erreur suppression ticket :", e);
+      this.setStatus('off');
+      toast("Erreur lors de la suppression", true);
+      return false;
+    }
+  },
+
+  /* -------- PETITE CAISSE (sorties d'argent pour achats courants) -------- */
+  async chargerPetiteCaisse() {
+    if (!firebaseReady) return;
+    try {
+      const snap = await db.collection(PETITE_CAISSE_COLLECTION).orderBy('createdAt', 'desc').limit(500).get();
+      State.petiteCaisse = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    } catch (e) {
+      console.error("Erreur chargement petite caisse :", e);
+      toast("Impossible de charger la petite caisse", true);
+    }
+  },
+
+  async sauvegarderPetiteCaisse(sortie) {
+    if (!firebaseReady) { toast("Pas de connexion — sortie non sauvegardée", true); return false; }
+    this.setStatus('busy');
+    try {
+      const payload = {
+        date: sortie.date,
+        heure: sortie.heure,
+        montant: Math.round(parseFloat(sortie.montant) * 100) / 100,
+        motif: sortie.motif || "",
+        employe: sortie.employe || "Non renseigné",
+        justificatifBase64: sortie.justificatifBase64 || null,
+        createdAt: sortie.createdAt || Date.now()
+      };
+      if (sortie.id) {
+        await db.collection(PETITE_CAISSE_COLLECTION).doc(sortie.id).set(payload, { merge: true });
+      } else {
+        const ref = await db.collection(PETITE_CAISSE_COLLECTION).add(payload);
+        State.petiteCaisse.unshift({ id: ref.id, ...payload });
+      }
+      this.setStatus('ok');
+      return true;
+    } catch (e) {
+      console.error("Erreur sauvegarde petite caisse :", e);
+      this.setStatus('off');
+      toast("Erreur lors de la sauvegarde (justificatif trop volumineux ?)", true);
+      return false;
+    }
+  },
+
+  async supprimerPetiteCaisse(id) {
+    if (!firebaseReady) return false;
+    this.setStatus('busy');
+    try {
+      await db.collection(PETITE_CAISSE_COLLECTION).doc(id).delete();
+      State.petiteCaisse = State.petiteCaisse.filter(s => s.id !== id);
+      this.setStatus('ok');
+      return true;
+    } catch (e) {
+      console.error("Erreur suppression petite caisse :", e);
       this.setStatus('off');
       toast("Erreur lors de la suppression", true);
       return false;
@@ -978,6 +1055,191 @@ const Tickets = {
 };
 
 /* ================================================================
+   SECTION 9C — RENDU : ÉCRAN "PETITE CAISSE" (sorties d'argent)
+   ================================================================ */
+function petiteCaisseFiltree() {
+  let list = [...State.petiteCaisse];
+  const periode = State.petiteCaisseFiltrePeriode;
+  if (periode !== 'tout') {
+    const now = Date.now();
+    const jours = periode === '7j' ? 7 : periode === '30j' ? 30 : 90;
+    const seuil = now - jours * 24 * 3600 * 1000;
+    list = list.filter(s => (s.createdAt || 0) >= seuil);
+  }
+  return list;
+}
+
+function renderEcranPetiteCaisse() {
+  if (!State.petiteCaisseDraft) State.petiteCaisseDraft = nouveauPetiteCaisseDraft();
+  const d = State.petiteCaisseDraft;
+  const list = petiteCaisseFiltree();
+  const totalSorti = list.reduce((s, x) => s + (x.montant || 0), 0);
+
+  const chipsPeriode = [['7j','7 jours'],['30j','30 jours'],['90j','3 mois'],['tout','Tout']].map(([k,l]) => `
+    <button class="filter-chip ${State.petiteCaisseFiltrePeriode===k?'active':''}" onclick="PetiteCaisse.setFiltrePeriode('${k}')">${l}</button>
+  `).join('');
+
+  const photoPreview = d.justificatifBase64 ? `
+    <div style="position:relative; margin-bottom:14px;">
+      <img src="${d.justificatifBase64}" style="width:100%; border-radius:10px; border:1px solid var(--border);">
+      <button class="btn-icon" style="position:absolute; top:8px; right:8px; background:rgba(182,64,47,0.9); color:#fff;" onclick="PetiteCaisse.retirerPhoto()">✕</button>
+    </div>` : `
+    <button class="btn btn-secondary" style="margin-bottom:14px;" onclick="document.getElementById('petiteCaissePhotoInput').click()">📷 Photographier le ticket de caisse</button>
+    <input type="file" id="petiteCaissePhotoInput" accept="image/*" capture="environment" style="display:none;" onchange="PetiteCaisse.choisirPhoto(this)">`;
+
+  const listHtml = list.length === 0 ? `
+    <div class="empty-state" style="padding:24px;">
+      <p>Aucune sortie de petite caisse enregistrée.</p>
+    </div>` : list.map(s => `
+      <div class="hist-item" onclick="PetiteCaisse.ouvrirDetail('${s.id}')">
+        <div class="hist-main">
+          <div class="hist-titre">${s.motif || 'Sans motif'}</div>
+          <div class="hist-meta">${formatDate(s.date)} à ${s.heure}${s.employe ? ' · ' + s.employe : ''}${s.justificatifBase64 ? ' · 📷' : ''}</div>
+        </div>
+        <div class="hist-right">
+          <div class="hist-montant" style="color:var(--ecart-bad);">−${formatMontant(s.montant)}</div>
+        </div>
+      </div>`).join('');
+
+  return `
+    <div class="card">
+      <div class="card-title">Nouvelle sortie de petite caisse</div>
+      <label>Montant (€)</label>
+      <input type="number" inputmode="decimal" step="0.01" value="${d.montant}"
+             placeholder="0,00"
+             onchange="PetiteCaisse.setField('montant', this.value)">
+      <label>Motif (ex : ampoule, papier, dépannage...)</label>
+      <input type="text" value="${d.motif}"
+             placeholder="Que vient-on d'acheter ?"
+             onchange="PetiteCaisse.setField('motif', this.value)">
+      <label>Justificatif (optionnel)</label>
+      ${photoPreview}
+      <button class="btn btn-primary" onclick="PetiteCaisse.enregistrer()">💾 Enregistrer la sortie</button>
+    </div>
+
+    <div class="total-banner" style="background:var(--ecart-bad);">
+      <span class="lbl">Total sorti (période affichée)</span>
+      <span class="val">${formatMontant(totalSorti)}</span>
+    </div>
+
+    <div class="filter-bar">${chipsPeriode}</div>
+    <div class="divider-text">Historique (${list.length})</div>
+    ${listHtml}
+  `;
+}
+
+const PetiteCaisse = {
+  setField(champ, value) {
+    State.petiteCaisseDraft[champ] = value;
+  },
+
+  setFiltrePeriode(p) {
+    State.petiteCaisseFiltrePeriode = p;
+    Render.screen();
+  },
+
+  choisirPhoto(input) {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      toast("Le fichier choisi n'est pas une image", true);
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        // Redimensionne et compresse l'image pour rester largement sous la limite
+        // de 1 Mo par document Firestore (une photo de ticket n'a pas besoin
+        // d'une résolution élevée pour rester lisible).
+        const maxLargeur = 900;
+        const ratio = Math.min(1, maxLargeur / img.width);
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width * ratio;
+        canvas.height = img.height * ratio;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const base64 = canvas.toDataURL('image/jpeg', 0.6);
+        State.petiteCaisseDraft.justificatifBase64 = base64;
+        Render.screen();
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  },
+
+  retirerPhoto() {
+    State.petiteCaisseDraft.justificatifBase64 = null;
+    Render.screen();
+  },
+
+  async enregistrer() {
+    const d = State.petiteCaisseDraft;
+    const montant = parseFloat(d.montant);
+    if (!montant || montant <= 0) {
+      toast("Saisis un montant valide avant d'enregistrer", true);
+      return;
+    }
+    if (!d.motif || !d.motif.trim()) {
+      toast("Indique un motif avant d'enregistrer", true);
+      return;
+    }
+    const ok = await Sync.sauvegarderPetiteCaisse(d);
+    if (ok) {
+      toast("Sortie de petite caisse enregistrée ✓");
+      State.petiteCaisseDraft = nouveauPetiteCaisseDraft();
+      Render.screen();
+    }
+  },
+
+  ouvrirDetail(id) {
+    const s = State.petiteCaisse.find(x => x.id === id);
+    if (!s) return;
+    this.detailId = id;
+    Render.screen();
+  },
+
+  fermerDetail() {
+    this.detailId = null;
+    Render.screen();
+  },
+
+  async supprimer(id) {
+    if (!confirm("Supprimer cette sortie de petite caisse ?")) return;
+    const ok = await Sync.supprimerPetiteCaisse(id);
+    if (ok) {
+      toast("Sortie supprimée");
+      this.detailId = null;
+      Render.screen();
+    }
+  }
+};
+
+function renderPetiteCaisseDetailModal() {
+  const s = State.petiteCaisse.find(x => x.id === PetiteCaisse.detailId);
+  if (!s) return '';
+  return `
+  <div class="modal-overlay" onclick="if(event.target===this) PetiteCaisse.fermerDetail()">
+    <div class="modal-sheet">
+      <div class="modal-handle"></div>
+      <div class="modal-title">${s.motif || 'Sortie de petite caisse'}</div>
+      <div class="hist-meta" style="margin-bottom:14px;">${formatDateHeure(s.createdAt || Date.now())}${s.employe ? ' · ' + s.employe : ''}</div>
+
+      ${s.justificatifBase64 ? `<img src="${s.justificatifBase64}" style="width:100%; border-radius:10px; border:1px solid var(--border); margin-bottom:14px;">` : ''}
+
+      <div class="total-banner" style="background:var(--ecart-bad);">
+        <span class="lbl">Montant sorti</span>
+        <span class="val">${formatMontant(s.montant)}</span>
+      </div>
+
+      <button class="btn btn-primary" style="margin-top:14px;" onclick="Export.exporterRecuPetiteCaisse('${s.id}')">🧾 Imprimer un reçu</button>
+      <button class="btn btn-danger" style="margin-top:10px; width:100%;" onclick="PetiteCaisse.supprimer('${s.id}')">🗑️ Supprimer</button>
+      <button class="btn btn-ghost" style="margin-top:10px;" onclick="PetiteCaisse.fermerDetail()">Fermer</button>
+    </div>
+  </div>`;
+}
+
+/* ================================================================
    SECTION 10 — RENDU : ÉCRAN "HISTORIQUE"
    ================================================================ */
 function comptagesFiltres() {
@@ -1409,6 +1671,58 @@ const Reglages = {
    SECTION 12B — EXPORT EXCEL & PDF
    ================================================================ */
 const Export = {
+  exporterRecuPetiteCaisse(id) {
+    const s = State.petiteCaisse.find(x => x.id === id);
+    if (!s) { toast("Sortie introuvable", true); return; }
+
+    const photoHtml = s.justificatifBase64 ? `
+      <div style="margin-top:18px;">
+        <div class="section-title">Justificatif</div>
+        <img src="${s.justificatifBase64}" style="width:100%; max-width:300px; border:1px solid #e2d9c8; border-radius:6px;">
+      </div>` : '';
+
+    const win = window.open('', '_blank');
+    win.document.write(`
+      <!DOCTYPE html>
+      <html lang="fr">
+      <head>
+      <meta charset="UTF-8">
+      <title>Reçu petite caisse — ${formatDate(s.date)}</title>
+      <style>
+        body{font-family:Georgia,'Times New Roman',serif; color:#2A2521; padding:40px; max-width:480px; margin:0 auto;}
+        h1{font-size:20px; margin-bottom:2px; color:#163f3e;}
+        .sub{color:#6b6258; font-size:13px; margin-bottom:24px;}
+        table.pdf-table{width:100%; border-collapse:collapse; margin-bottom:8px;}
+        table.pdf-table td{padding:7px 4px; border-bottom:1px solid #e2d9c8; font-size:14px;}
+        .section-title{font-size:12px; text-transform:uppercase; letter-spacing:.6px; font-weight:700; color:#1F5C5A; margin:18px 0 6px; border-bottom:2px solid #1F5C5A; padding-bottom:4px;}
+        .total-row{display:flex; justify-content:space-between; padding:12px 0; border-top:2px solid #163f3e; border-bottom:2px solid #163f3e; font-weight:700; font-size:18px; margin-top:10px; color:#b6402f;}
+        .meta{font-size:12px; color:#6b6258; margin-top:30px; border-top:1px solid #e2d9c8; padding-top:10px;}
+        @media print{ body{padding:15mm;} }
+      </style>
+      </head>
+      <body>
+        <h1>🦪 La Marmite Bleue — Reçu petite caisse</h1>
+        <div class="sub">Justificatif interne de sortie d'argent — pas un ticket de vente</div>
+
+        <table class="pdf-table">
+          <tr><td>Date</td><td style="text-align:right;">${formatDateHeure(s.createdAt || Date.now())}</td></tr>
+          <tr><td>Motif</td><td style="text-align:right;">${s.motif || '—'}</td></tr>
+          <tr><td>Pris par</td><td style="text-align:right;">${s.employe || '—'}</td></tr>
+        </table>
+
+        <div class="total-row"><span>MONTANT SORTI</span><span>${formatMontant(s.montant)}</span></div>
+
+        ${photoHtml}
+
+        <div class="meta">Document généré le ${formatDateHeure(Date.now())} — usage interne uniquement</div>
+
+        <script>window.onload = function(){ window.print(); };</script>
+      </body>
+      </html>
+    `);
+    win.document.close();
+  },
+
   exporterExcel() {
     const list = comptagesFiltres();
     if (list.length === 0) { toast("Rien à exporter pour ces filtres", true); return; }
@@ -1574,18 +1888,22 @@ const Render = {
     switch (State.currentScreen) {
       case 'nouveau': html = renderEcranNouveau(); break;
       case 'tickets': html = renderEcranTickets(); break;
+      case 'petitecaisse': html = renderEcranPetiteCaisse(); break;
       case 'historique': html = renderEcranHistorique(); break;
       case 'stats': html = renderEcranStats(); break;
       case 'reglages': html = renderEcranReglages(); break;
       default: html = renderEcranNouveau();
     }
-    el.innerHTML = html + (State.editingHistId ? renderDetailModal() : '');
+    el.innerHTML = html
+      + (State.editingHistId ? renderDetailModal() : '')
+      + (State.currentScreen === 'petitecaisse' && PetiteCaisse.detailId ? renderPetiteCaisseDetailModal() : '');
 
     const sub = document.getElementById('topbarSub');
     if (sub) {
       const titreEcran = {
         nouveau: 'Nouveau comptage',
         tickets: 'Saisie des tickets',
+        petitecaisse: 'Petite caisse',
         historique: 'Historique des comptages',
         stats: "Statistiques d'écarts",
         reglages: 'Réglages'
@@ -1615,6 +1933,7 @@ async function initApp() {
   State.draft = nouveauDraft(); // ré-applique caisses/services/employé à jour
   await Sync.chargerComptages();
   await Sync.chargerTickets();
+  await Sync.chargerPetiteCaisse();
 
   if (State.currentScreen === 'nouveau') Render.screen();
 

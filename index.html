@@ -322,20 +322,21 @@ input[type=number]{text-align:right; font-weight:600;}
 }
 .nav-item{
   flex:1;
-  padding:10px 4px 8px;
+  padding:9px 2px 7px;
   display:flex;
   flex-direction:column;
   align-items:center;
-  gap:3px;
+  gap:2px;
   background:none;
   border:none;
   color:var(--ink-soft);
   cursor:pointer;
   font-family:'Figtree',sans-serif;
+  min-width:0;
 }
 .nav-item.active{color:var(--terracotta);}
-.nav-item .ic{font-size:20px;}
-.nav-item .lb{font-size:10.5px; font-weight:700;}
+.nav-item .ic{font-size:18px;}
+.nav-item .lb{font-size:9.5px; font-weight:700; white-space:nowrap;}
 
 /* ---------- LISTS / HISTORY ---------- */
 .hist-item{
@@ -665,6 +666,9 @@ textarea{resize:vertical; min-height:60px;}
     </button>
     <button class="nav-item" id="navTickets" onclick="Nav.go('tickets')">
       <span class="ic">🧾</span><span class="lb">Tickets</span>
+    </button>
+    <button class="nav-item" id="navPetitecaisse" onclick="Nav.go('petitecaisse')">
+      <span class="ic">🪙</span><span class="lb">P. caisse</span>
     </button>
     <button class="nav-item" id="navHistorique" onclick="Nav.go('historique')">
       <span class="ic">📋</span><span class="lb">Historique</span>
