@@ -97,7 +97,11 @@ const State = {
   ticketMontantSaisie: "", // montant en cours de frappe sur le pavé numérique tickets
   petiteCaisseDraft: null, // sortie de petite caisse en cours de saisie
   petiteCaisseFiltrePeriode: '30j',
-  rapportDate: new Date().toISOString().slice(0,10) // date sélectionnée pour le rapport journalier
+  rapportDate: new Date().toISOString().slice(0,10), // date sélectionnée pour le rapport journalier
+  statsPeriode: '30j', // période pour l'écran Stats et les alertes d'écarts récurrents
+  statsDateDebut: null, // utilisé si statsPeriode === 'perso'
+  statsDateFin: null,
+  seuilAlertesRecurrentes: 2 // nb d'écarts jaunes+rouges déclenchant une alerte récurrence
 };
 
 const SESSION_KEY = 'caisseMarmiteEmployeActif';
@@ -1505,14 +1509,102 @@ function renderDetailModal() {
 /* ================================================================
    SECTION 11 — RENDU : ÉCRAN "STATS"
    ================================================================ */
+// Filtre les comptages de clôture (avec écart renseigné) selon la période
+// choisie dans l'écran Stats — période fixe (7j/30j/90j/tout) ou plage de
+// dates personnalisée choisie par l'utilisateur.
+function clituresPourStats() {
+  let list = State.comptages.filter(c => c.type === 'cloture');
+  const periode = State.statsPeriode;
+  if (periode === 'perso' && State.statsDateDebut && State.statsDateFin) {
+    list = list.filter(c => c.date >= State.statsDateDebut && c.date <= State.statsDateFin);
+  } else if (periode !== 'tout' && periode !== 'perso') {
+    const now = Date.now();
+    const jours = periode === '7j' ? 7 : periode === '30j' ? 30 : 90;
+    const seuil = now - jours * 24 * 3600 * 1000;
+    list = list.filter(c => (c.createdAt || 0) >= seuil);
+  }
+  return list;
+}
+
+// Calcule les alertes de récurrence : pour chaque caisse / employé, compte le
+// nombre d'écarts non-"ok" (jaune+rouge confondus) sur les comptages filtrés,
+// et signale ceux qui dépassent le seuil défini.
+function calculerAlertesRecurrentes(list) {
+  const grouper = (list, champ) => {
+    const groupes = {};
+    list.forEach(c => {
+      const cle = c[champ] || '—';
+      if (!groupes[cle]) groupes[cle] = { total: 0, nonOk: 0, ecartsMode: {} };
+      MODES_PAIEMENT.forEach(m => {
+        const ec = c[m.champEcart];
+        if (ec === null || ec === undefined) return;
+        groupes[cle].total++;
+        if (statutEcart(ec, State.seuilEcartAlerte) !== 'ok') groupes[cle].nonOk++;
+      });
+    });
+    return Object.entries(groupes)
+      .map(([nom, v]) => ({ nom, ...v }))
+      .filter(g => g.nonOk >= State.seuilAlertesRecurrentes)
+      .sort((a,b) => b.nonOk - a.nonOk);
+  };
+  return {
+    parCaisse: grouper(list, 'caisse'),
+    parEmploye: grouper(list, 'employe')
+  };
+}
+
 function renderEcranStats() {
-  const list = State.comptages.filter(c => c.type === 'cloture' && c.ecart !== null && c.ecart !== undefined);
+  const list = clituresPourStats().filter(c => c.ecart !== null && c.ecart !== undefined);
+  const alertes = calculerAlertesRecurrentes(clituresPourStats());
+
+  const chipsPeriode = [['7j','7 jours'],['30j','30 jours'],['90j','3 mois'],['tout','Tout'],['perso','Période perso']].map(([k,l]) => `
+    <button class="filter-chip ${State.statsPeriode===k?'active':''}" onclick="Stats.setPeriode('${k}')">${l}</button>
+  `).join('');
+
+  const datesPerso = State.statsPeriode === 'perso' ? `
+    <div class="card">
+      <div class="card-title">Période personnalisée</div>
+      <div class="field-row">
+        <div>
+          <label>Du</label>
+          <input type="date" value="${State.statsDateDebut || ''}" onchange="Stats.setDatePerso('debut', this.value)">
+        </div>
+        <div>
+          <label>Au</label>
+          <input type="date" value="${State.statsDateFin || ''}" onchange="Stats.setDatePerso('fin', this.value)">
+        </div>
+      </div>
+    </div>
+  ` : '';
+
+  const renderAlertes = (titre, liste, icone) => {
+    if (liste.length === 0) return '';
+    const lignes = liste.map(a => `
+      <div class="hist-item" style="cursor:default; border-color:var(--ecart-warn);">
+        <div class="hist-main">
+          <div class="hist-titre">${icone} ${a.nom}</div>
+          <div class="hist-meta">${a.nonOk} écart${a.nonOk>1?'s':''} non-juste${a.nonOk>1?'s':''} sur ${a.total} rapprochement${a.total>1?'s':''}</div>
+        </div>
+        <div class="hist-right">
+          <span class="hist-badge warn">⚠ récurrent</span>
+        </div>
+      </div>`).join('');
+    return `
+      <div class="card" style="border-color:var(--ecart-warn);">
+        <div class="card-title" style="color:var(--ecart-warn);">${titre}</div>
+        ${lignes}
+      </div>`;
+  };
+
+  const alertesHtml = renderAlertes('⚠ Alertes — caisses', alertes.parCaisse, '🗄️') + renderAlertes('⚠ Alertes — employés', alertes.parEmploye, '👤');
 
   if (list.length === 0) {
     return `
+      <div class="filter-bar">${chipsPeriode}</div>
+      ${datesPerso}
       <div class="empty-state">
         <div class="ic">📊</div>
-        <p><strong>Pas encore de données</strong></p>
+        <p><strong>Pas encore de données pour cette période</strong></p>
         <p>Les statistiques d'écart apparaîtront ici dès qu'un comptage de clôture avec rapprochement aura été enregistré.</p>
       </div>`;
   }
@@ -1548,6 +1640,11 @@ function renderEcranStats() {
   }).join('');
 
   return `
+    <div class="filter-bar">${chipsPeriode}</div>
+    ${datesPerso}
+
+    ${alertesHtml}
+
     <div class="card">
       <div class="card-title">Vue d'ensemble — ${list.length} clôture(s)</div>
       <div class="grid-2">
@@ -1582,12 +1679,42 @@ function renderEcranStats() {
 
     <div class="divider-text">Par caisse</div>
     ${lignesCaisses}
+
+    <div class="card" style="margin-top:14px;">
+      <div class="card-title">Réglage des alertes récurrentes</div>
+      <label>Déclencher une alerte à partir de combien d'écarts non-justes (jaune ou rouge) ?</label>
+      <input type="number" inputmode="numeric" min="1" step="1" value="${State.seuilAlertesRecurrentes}"
+             onchange="Stats.setSeuilRecurrence(this.value)">
+      <div class="helper-text" style="margin-bottom:0;">S'applique séparément à chaque caisse et à chaque employé, sur la période sélectionnée ci-dessus.</div>
+    </div>
   `;
 }
 
 /* ================================================================
    SECTION 12 — RENDU : ÉCRAN "RÉGLAGES"
    ================================================================ */
+const Stats = {
+  setPeriode(p) {
+    State.statsPeriode = p;
+    if (p === 'perso' && !State.statsDateDebut) {
+      const aujourdhui = new Date().toISOString().slice(0,10);
+      State.statsDateDebut = aujourdhui;
+      State.statsDateFin = aujourdhui;
+    }
+    Render.screen();
+  },
+  setDatePerso(champ, value) {
+    if (champ === 'debut') State.statsDateDebut = value;
+    else State.statsDateFin = value;
+    Render.screen();
+  },
+  setSeuilRecurrence(value) {
+    const v = parseInt(value, 10);
+    State.seuilAlertesRecurrentes = isNaN(v) || v < 1 ? 2 : v;
+    Render.screen();
+  }
+};
+
 function renderListeEditable(liste, type) {
   return liste.map((item, i) => `
     <div class="denom-row" style="padding:6px 0;">
