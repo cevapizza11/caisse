@@ -40,8 +40,8 @@ const EMPLOYES_DOC = "config/employes";
 /* ================================================================
    SECTION 2 — DÉNOMINATIONS (billets / pièces EUR)
    ================================================================ */
-const BILLETS = [50, 20, 10, 5];
-const PIECES  = [2, 1, 0.5, 0.2, 0.1, 0.05];
+const BILLETS = [500, 200, 100, 50, 20, 10, 5];
+const PIECES  = [2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01];
 
 // Liste centrale des modes de paiement gérés par l'app. Toute la logique
 // (saisie tickets, rapprochement, écarts, exports) s'appuie sur cette liste
@@ -275,9 +275,11 @@ function estAdmin() {
   return !!(emp && emp.admin);
 }
 
+const ECRANS_RESERVES_ADMIN = ['reglages', 'historique', 'stats'];
+
 const Nav = {
   go(screen) {
-    if (screen === 'reglages' && !estAdmin()) {
+    if (ECRANS_RESERVES_ADMIN.includes(screen) && !estAdmin()) {
       toast("Accès réservé à l'administrateur", true);
       return;
     }
@@ -309,8 +311,11 @@ const Nav = {
       const el = document.getElementById('nav' + s.charAt(0).toUpperCase() + s.slice(1));
       if (el) el.classList.toggle('active', s === screen);
     });
-    const reglagesBtn = document.getElementById('navReglages');
-    if (reglagesBtn) reglagesBtn.style.display = estAdmin() ? '' : 'none';
+    const admin = estAdmin();
+    ECRANS_RESERVES_ADMIN.forEach(s => {
+      const btn = document.getElementById('nav' + s.charAt(0).toUpperCase() + s.slice(1));
+      if (btn) btn.style.display = admin ? '' : 'none';
+    });
   }
 };
 
@@ -2393,7 +2398,7 @@ const Export = {
    ================================================================ */
 const Render = {
   screen() {
-    if (State.currentScreen === 'reglages' && !estAdmin()) {
+    if (ECRANS_RESERVES_ADMIN.includes(State.currentScreen) && !estAdmin()) {
       State.currentScreen = 'nouveau';
       State.draft = nouveauDraft();
       Nav.updateActiveTab('nouveau');
