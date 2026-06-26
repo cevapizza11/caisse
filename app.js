@@ -131,6 +131,7 @@ function nouveauDraft() {
     fondDeCaisse: 0,       // montant de départ en caisse, pour calcul écart sur clôture
     commentaire: "",
     forcerOuverture: false, // permet à un admin de contourner le blocage d'ouverture en doublon
+    forcerCloture: false,   // permet à un admin de contourner le blocage de clôture sans ouverture
     createdAt: null
   };
 }
@@ -898,6 +899,11 @@ function renderEcranNouveau() {
   if (fondVerrouille && d.fondDeCaisse !== ouvertureDeReference.total) {
     d.fondDeCaisse = ouvertureDeReference.total;
   }
+  // Symétrique du blocage d'ouverture en doublon : on ne peut pas créer une
+  // NOUVELLE clôture pour une caisse qui n'a aucune ouverture active en
+  // attente, sauf forçage admin. Ne s'applique pas à l'édition d'une clôture
+  // déjà existante (d.id rempli), qui a forcément déjà été validée à l'époque.
+  const clotureBloquee = d.type === 'cloture' && !d.id && !ouvertureDeReference && !d.forcerCloture;
 
   // Si le CA théorique espèces n'a pas été saisi manuellement, on propose
   // automatiquement le total des tickets espèces enregistrés pour ce contexte.
@@ -951,6 +957,20 @@ function renderEcranNouveau() {
     ${estAdmin() ? `
       <button class="btn ${d.forcerOuverture ? 'btn-primary' : 'btn-ghost'}" style="margin-top:-4px; margin-bottom:14px;" onclick="Draft.toggleForcerOuverture()">
         ${d.forcerOuverture ? '✓ Ouverture forcée — décocher' : '🔓 Forcer une nouvelle ouverture malgré tout'}
+      </button>
+    ` : ''}
+    ` : ''}
+
+    ${d.type === 'cloture' && !d.id && !ouvertureDeReference ? `
+    <div class="ecart-box ${d.forcerCloture ? 'warn' : 'bad'}">
+      <span class="lbl" style="line-height:1.4;">
+        ⚠ ${d.caisse} n'a pas d'ouverture en cours — impossible de la clôturer sans avoir d'abord enregistré son ouverture.
+        ${estAdmin() ? "Fais d'abord l'ouverture, ou force la clôture ci-dessous." : "Demande à un administrateur de forcer la clôture, ou fais d'abord l'ouverture de cette caisse."}
+      </span>
+    </div>
+    ${estAdmin() ? `
+      <button class="btn ${d.forcerCloture ? 'btn-primary' : 'btn-ghost'}" style="margin-top:-4px; margin-bottom:14px;" onclick="Draft.toggleForcerCloture()">
+        ${d.forcerCloture ? '✓ Clôture forcée — décocher' : '🔓 Forcer la clôture malgré tout'}
       </button>
     ` : ''}
     ` : ''}
@@ -1051,7 +1071,7 @@ function renderEcranNouveau() {
       <textarea placeholder="Ex : billet déchiré mis de côté, erreur de rendu monnaie..." onchange="Draft.setField('commentaire', this.value)">${d.commentaire || ''}</textarea>
     </div>
 
-    <button class="btn btn-primary" ${ouvertureBloquee ? 'disabled' : ''} onclick="Draft.enregistrer()">💾 Enregistrer le comptage</button>
+    <button class="btn btn-primary" ${(ouvertureBloquee || clotureBloquee) ? 'disabled' : ''} onclick="Draft.enregistrer()">💾 Enregistrer le comptage</button>
 
     ${State.dernierComptageId && !d.id ? `
       <button class="btn btn-secondary" style="margin-top:10px;" onclick="Export.exporterPdf('${State.dernierComptageId}')">🧾 Imprimer le dernier comptage enregistré</button>
@@ -1071,7 +1091,7 @@ const Draft = {
       State.draft.fondDeCaisse = parseFloat(value) || 0;
     } else {
       State.draft[field] = value;
-      if (field === 'caisse') State.draft.forcerOuverture = false;
+      if (field === 'caisse') { State.draft.forcerOuverture = false; State.draft.forcerCloture = false; }
     }
     Render.screen();
   },
@@ -1079,6 +1099,12 @@ const Draft = {
   setType(type) {
     State.draft.type = type;
     State.draft.forcerOuverture = false; // on réinitialise le forçage à chaque changement de type
+    State.draft.forcerCloture = false;
+    Render.screen();
+  },
+
+  toggleForcerCloture() {
+    State.draft.forcerCloture = !State.draft.forcerCloture;
     Render.screen();
   },
 
@@ -1139,7 +1165,15 @@ const Draft = {
     // champ avait été contourné côté interface (il est censé être verrouillé).
     if (d.type === 'cloture') {
       const ouvertureDeReference = caisseADejaOuvertureActive(d.caisse);
-      if (ouvertureDeReference) d.fondDeCaisse = ouvertureDeReference.total;
+      if (ouvertureDeReference) {
+        d.fondDeCaisse = ouvertureDeReference.total;
+      } else if (!d.id && !d.forcerCloture) {
+        // Empêche de CRÉER une nouvelle clôture pour une caisse qui n'a pas
+        // d'ouverture en cours, sauf si un admin a explicitement coché "forcer".
+        // Ne s'applique pas à l'édition d'une clôture déjà existante (d.id rempli).
+        toast(d.caisse + " n'a pas d'ouverture en cours — fais d'abord l'ouverture ou demande à un administrateur de forcer la clôture", true);
+        return;
+      }
     }
     // Si le CA théorique espèces n'a pas été saisi à la main, on fige la valeur
     // automatique issue des tickets au moment de l'enregistrement, pour que
@@ -1666,6 +1700,7 @@ const Hist = {
       fondDeCaisse: c.fondDeCaisse || 0,
       commentaire: c.commentaire || "",
       forcerOuverture: false,
+      forcerCloture: false,
       createdAt: c.createdAt
     };
     Nav.go('nouveau');
