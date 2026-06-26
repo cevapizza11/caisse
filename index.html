@@ -625,6 +625,26 @@ textarea{resize:vertical; min-height:60px;}
   cursor:pointer;
   font-family:'Figtree',sans-serif;
 }
+
+/* ---------- RESPONSIVE : tablette / PC ----------
+   Sur petit écran (téléphone), rien ne change : la colonne reste à 560px.
+   Au-delà de 700px de largeur d'écran, on élargit progressivement la
+   colonne centrale pour mieux utiliser l'espace disponible, au lieu de
+   laisser du vide à gauche et à droite. */
+@media (min-width: 700px) {
+  #app, .bottom-nav, .modal-sheet {
+    max-width: 720px;
+  }
+}
+@media (min-width: 1000px) {
+  #app, .bottom-nav, .modal-sheet {
+    max-width: 820px;
+  }
+  #screen {
+    padding-left: 24px;
+    padding-right: 24px;
+  }
+}
 </style>
 </head>
 <body>
