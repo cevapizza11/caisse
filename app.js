@@ -94,11 +94,13 @@ const State = {
   draft: null,         // comptage en cours de saisie
   editingHistId: null,
   seuilEcartAlerte: 5,  // € — au-delà, écart affiché en rouge
+  montantCibleFondCaisse: 80, // montant cible à laisser en caisse après le retrait de clôture (réglable)
   ticketContexte: null, // {caisse, service, date} sélectionné sur l'écran Tickets
   ticketMontantSaisie: "", // montant en cours de frappe sur le pavé numérique tickets
   petiteCaisseDraft: null, // sortie de petite caisse en cours de saisie
   petiteCaisseFiltrePeriode: '30j',
   rapportDate: new Date().toISOString().slice(0,10), // date sélectionnée pour le rapport journalier
+  dernierComptageId: null, // id du dernier comptage enregistré, pour proposer l'impression directe sans passer par l'historique
   statsPeriode: '30j', // période pour l'écran Stats et les alertes d'écarts récurrents
   statsDateDebut: null, // utilisé si statsPeriode === 'perso'
   statsDateFin: null,
@@ -625,13 +627,15 @@ const Sync = {
         ecartCQ: ecartCQ,
         createdAt: draft.createdAt || Date.now()
       };
+      let idComptage = draft.id;
       if (draft.id) {
         await db.collection(COLLECTION).doc(draft.id).set(payload, { merge: true });
       } else {
-        await db.collection(COLLECTION).add(payload);
+        const ref = await db.collection(COLLECTION).add(payload);
+        idComptage = ref.id;
       }
       this.setStatus('ok');
-      return true;
+      return idComptage;
     } catch (e) {
       console.error("Erreur sauvegarde :", e);
       this.setStatus('off');
@@ -796,6 +800,7 @@ const Sync = {
         if (data.caisses && data.caisses.length) State.caisses = data.caisses;
         if (data.services && data.services.length) State.services = data.services;
         if (data.seuilEcartAlerte !== undefined) State.seuilEcartAlerte = data.seuilEcartAlerte;
+        if (data.montantCibleFondCaisse !== undefined) State.montantCibleFondCaisse = data.montantCibleFondCaisse;
       }
     } catch (e) {
       console.error("Erreur chargement config :", e);
@@ -839,7 +844,8 @@ const Sync = {
       await db.doc(CAISSES_DOC).set({
         caisses: State.caisses,
         services: State.services,
-        seuilEcartAlerte: State.seuilEcartAlerte
+        seuilEcartAlerte: State.seuilEcartAlerte,
+        montantCibleFondCaisse: State.montantCibleFondCaisse
       });
       toast("Réglages enregistrés");
     } catch (e) {
@@ -882,6 +888,16 @@ function renderEcranNouveau() {
   const totauxTickets = totauxTicketsPour(d.caisse, d.service, d.date);
   const ouvertureActive = d.type === 'fond' ? caisseADejaOuvertureActive(d.caisse, d.id) : null;
   const ouvertureBloquee = !!ouvertureActive && !d.forcerOuverture;
+
+  // À la clôture, le fond de caisse de départ doit correspondre exactement à
+  // ce qui a été réellement compté à l'ouverture (et non à une saisie libre),
+  // pour garantir la cohérence du rapprochement. On retrouve cette ouverture
+  // de référence et on verrouille le champ si elle existe.
+  const ouvertureDeReference = d.type === 'cloture' ? caisseADejaOuvertureActive(d.caisse) : null;
+  const fondVerrouille = !!ouvertureDeReference;
+  if (fondVerrouille && d.fondDeCaisse !== ouvertureDeReference.total) {
+    d.fondDeCaisse = ouvertureDeReference.total;
+  }
 
   // Si le CA théorique espèces n'a pas été saisi manuellement, on propose
   // automatiquement le total des tickets espèces enregistrés pour ce contexte.
@@ -964,7 +980,13 @@ function renderEcranNouveau() {
       <label>Fond de caisse de départ (€)</label>
       <input type="number" inputmode="decimal" step="0.01" value="${d.fondDeCaisse || ''}"
              placeholder="0,00"
+             ${fondVerrouille ? 'readonly style="background:#fafaf7; color:var(--ink-soft);"' : ''}
              onchange="Draft.setField('fondDeCaisse', this.value)">
+      <div class="helper-text" style="${fondVerrouille ? '' : 'margin-top:-8px;'}">
+        ${fondVerrouille
+          ? "🔒 Verrouillé — correspond au comptage d'ouverture du " + formatDateHeure(ouvertureDeReference.createdAt || Date.now()) + (ouvertureDeReference.employe ? ' par ' + ouvertureDeReference.employe : '') + '.'
+          : 'Aucune ouverture trouvée pour cette caisse — saisis le fond de départ manuellement.'}
+      </div>
       <label>CA théorique espèces (€)</label>
       <input type="number" inputmode="decimal" step="0.01" value="${d.caTheorique === null ? '' : d.caTheorique}"
              placeholder="${totauxTickets.nbTickets > 0 ? 'Auto : ' + formatMontant(totauxTickets.especes) + ' (depuis les tickets)' : 'Laisser vide si pas de rapprochement'}"
@@ -1005,6 +1027,14 @@ function renderEcranNouveau() {
       <span class="val">${formatMontantSigne(ecart)}</span>
     </div>` : ''}
 
+    ${d.type === 'cloture' ? `
+    <div class="ecart-box" style="border-color:var(--teal-light); background:#eef6f5;">
+      <span class="lbl" style="color:var(--teal-dark);">💰 À retirer pour la banque/coffre</span>
+      <span class="val" style="color:var(--teal-dark);">${formatMontant(Math.max(0, total - State.montantCibleFondCaisse))}</span>
+    </div>
+    <div class="helper-text" style="margin-top:-8px; margin-bottom:14px;">Pour ramener la caisse à ${formatMontant(State.montantCibleFondCaisse)} (montant cible défini dans Réglages) avant la prochaine ouverture.${total < State.montantCibleFondCaisse ? ' ⚠ Le total compté est inférieur au montant cible — rien à retirer, et il manque ' + formatMontant(State.montantCibleFondCaisse - total) + ' pour atteindre la cible.' : ''}</div>
+    ` : ''}
+
     ${MODES_PAIEMENT.filter(m => !m.compteEspeces).map(m => {
       const ec = calculEcartMode(d, m.cle);
       if (ec === null) return '';
@@ -1022,6 +1052,10 @@ function renderEcranNouveau() {
     </div>
 
     <button class="btn btn-primary" ${ouvertureBloquee ? 'disabled' : ''} onclick="Draft.enregistrer()">💾 Enregistrer le comptage</button>
+
+    ${State.dernierComptageId && !d.id ? `
+      <button class="btn btn-secondary" style="margin-top:10px;" onclick="Export.exporterPdf('${State.dernierComptageId}')">🧾 Imprimer le dernier comptage enregistré</button>
+    ` : ''}
     <div class="section-gap"></div>
   `;
 }
@@ -1100,6 +1134,13 @@ const Draft = {
         return;
       }
     }
+    // Sécurité supplémentaire : si une ouverture de référence existe pour
+    // cette clôture, on réimpose le fond de caisse correspondant, même si le
+    // champ avait été contourné côté interface (il est censé être verrouillé).
+    if (d.type === 'cloture') {
+      const ouvertureDeReference = caisseADejaOuvertureActive(d.caisse);
+      if (ouvertureDeReference) d.fondDeCaisse = ouvertureDeReference.total;
+    }
     // Si le CA théorique espèces n'a pas été saisi à la main, on fige la valeur
     // automatique issue des tickets au moment de l'enregistrement, pour que
     // l'historique reflète exactement l'écart qui était affiché à l'écran.
@@ -1107,12 +1148,20 @@ const Draft = {
       const totauxTickets = totauxTicketsPour(d.caisse, d.service, d.date);
       if (totauxTickets.nbTickets > 0) d.caTheorique = totauxTickets.especes;
     }
-    const ok = await Sync.sauvegarderComptage(d);
-    if (ok) {
+    const idComptage = await Sync.sauvegarderComptage(d);
+    if (idComptage) {
       toast(d.id ? "Comptage modifié" : "Comptage enregistré ✓");
       await Sync.chargerComptages();
+      State.dernierComptageId = idComptage;
       State.draft = nouveauDraft();
-      Nav.go('historique');
+      // Les non-admins n'ont pas accès à l'Historique : on les laisse sur
+      // l'écran de saisie (qui propose désormais un bouton d'impression
+      // directe) plutôt que de tenter une redirection bloquée.
+      if (estAdmin()) {
+        Nav.go('historique');
+      } else {
+        Nav.go('nouveau');
+      }
     }
   }
 };
@@ -1961,6 +2010,14 @@ function renderEcranReglages() {
       <div class="helper-text">En dessous de 0,50 € l'écart est toujours considéré comme "juste" (arrondis de caisse).</div>
     </div>
 
+    <div class="card">
+      <div class="card-title">Montant cible du fond de caisse</div>
+      <label>Montant à laisser en caisse après le retrait de clôture (€)</label>
+      <input type="number" inputmode="decimal" step="1" min="0" value="${State.montantCibleFondCaisse}"
+             onchange="Reglages.setMontantCible(this.value)">
+      <div class="helper-text">À la clôture, l'app calcule combien retirer du tiroir pour ramener la caisse à ce montant, prêt pour la prochaine ouverture.</div>
+    </div>
+
     <div class="helper-text" style="text-align:center; margin-top:4px;">✓ Toutes les modifications sont enregistrées automatiquement</div>
 
     <div class="divider-text">À propos</div>
@@ -1998,6 +2055,12 @@ const Reglages = {
   setSeuil(value) {
     const v = parseFloat(value);
     State.seuilEcartAlerte = isNaN(v) ? 5 : Math.max(0, v);
+    Sync.sauvegarderConfig();
+  },
+
+  setMontantCible(value) {
+    const v = parseFloat(value);
+    State.montantCibleFondCaisse = isNaN(v) ? 0 : Math.max(0, v);
     Sync.sauvegarderConfig();
   },
 
