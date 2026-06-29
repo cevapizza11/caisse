@@ -40,8 +40,8 @@ const EMPLOYES_DOC = "config/employes";
 /* ================================================================
    SECTION 2 — DÉNOMINATIONS (billets / pièces EUR)
    ================================================================ */
-const BILLETS = [100, 50, 20, 10, 5];
-const PIECES  = [2, 1, 0.5, 0.2, 0.1, 0.05];
+const BILLETS = [500, 200, 100, 50, 20, 10, 5];
+const PIECES  = [2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01];
 
 // Liste centrale des modes de paiement gérés par l'app. Toute la logique
 // (saisie tickets, rapprochement, écarts, exports) s'appuie sur cette liste
@@ -223,6 +223,19 @@ function caisseADejaOuvertureActive(caisse, idAExclure) {
   if (comptagesCaisse.length === 0) return null;
   const dernier = comptagesCaisse[comptagesCaisse.length - 1];
   return dernier.type === 'fond' ? dernier : null;
+}
+
+// Récupère les tickets d'une caisse strictement compris entre l'horodatage
+// d'une ouverture et celui d'une clôture (bornes incluses) — plus précis que
+// le filtrage par service, car il capture exactement ce qui s'est passé
+// pendant ce cycle de caisse, même si le service a changé en cours de route.
+function ticketsEntreOuvertureEtCloture(caisse, createdAtOuverture, createdAtCloture) {
+  const cibleNormalisee = normaliserNomCaisse(caisse);
+  return State.tickets
+    .filter(t => normaliserNomCaisse(t.caisse) === cibleNormalisee
+      && (t.createdAt || 0) >= createdAtOuverture
+      && (t.createdAt || 0) <= createdAtCloture)
+    .sort((a,b) => (a.createdAt||0) - (b.createdAt||0));
 }
 
 function donneesJourPour(date, caisse) {
@@ -1182,6 +1195,16 @@ const Draft = {
       const totauxTickets = totauxTicketsPour(d.caisse, d.service, d.date);
       if (totauxTickets.nbTickets > 0) d.caTheorique = totauxTickets.especes;
     }
+    // Capture si c'est la création d'une NOUVELLE clôture (pas une édition),
+    // ainsi que l'id de l'ouverture associée — utilisé après la sauvegarde
+    // pour ouvrir automatiquement la feuille de caisse prête à imprimer.
+    const estNouvelleCloture = d.type === 'cloture' && !d.id;
+    let idOuvertureAssociee = null;
+    if (estNouvelleCloture) {
+      const ouvertureDeReference = caisseADejaOuvertureActive(d.caisse);
+      if (ouvertureDeReference) idOuvertureAssociee = ouvertureDeReference.id;
+    }
+
     const idComptage = await Sync.sauvegarderComptage(d);
     if (idComptage) {
       toast(d.id ? "Comptage modifié" : "Comptage enregistré ✓");
@@ -1195,6 +1218,13 @@ const Draft = {
         Nav.go('historique');
       } else {
         Nav.go('nouveau');
+      }
+      // Ouvre automatiquement la feuille de caisse prête à imprimer, avec le
+      // détail des tickets de l'ouverture à la clôture, juste après une
+      // nouvelle clôture (pas à l'édition, pour ne pas réimprimer à chaque
+      // petite correction ultérieure).
+      if (estNouvelleCloture) {
+        Export.exporterPdf(idComptage, idOuvertureAssociee);
       }
     }
   }
@@ -2400,7 +2430,7 @@ const Export = {
     toast("Export Excel généré");
   },
 
-  exporterPdf(id) {
+  exporterPdf(id, idOuvertureAssociee) {
     const c = State.comptages.find(x => x.id === id);
     if (!c) { toast("Comptage introuvable", true); return; }
     const denomQte = c.denomQte || {};
@@ -2446,16 +2476,40 @@ const Export = {
         <strong>Commentaire :</strong> ${c.commentaire}
       </div>` : '';
 
-    // Tickets de la journée pour cette même caisse et ce même service —
-    // permet d'avoir le détail des ventes par mode de paiement à côté de
-    // l'état de caisse, sans avoir à imprimer un rapport journalier séparé.
-    const totauxTickets = totauxTicketsPour(c.caisse, c.service, c.date);
-    const lignesModesTickets = MODES_PAIEMENT.filter(m => (totauxTickets[m.cle]||0) > 0).map(m => `
-      <tr><td>${m.icone} ${m.label}</td><td style="text-align:right;">${formatMontant(totauxTickets[m.cle])}</td></tr>
+    // Si une ouverture associée est fournie (ou retrouvable automatiquement),
+    // on filtre les tickets par plage horaire RÉELLE entre l'ouverture et la
+    // clôture — plus précis que le filtrage par service, qui peut chevaucher
+    // un changement de service en cours de cycle. Sinon, on retombe sur le
+    // filtrage par service (comportement historique, pour rétrocompatibilité).
+    let ouvertureAssociee = null;
+    if (c.type === 'cloture') {
+      if (idOuvertureAssociee) {
+        ouvertureAssociee = State.comptages.find(x => x.id === idOuvertureAssociee) || null;
+      } else {
+        // Retrouve automatiquement la dernière ouverture de cette caisse
+        // antérieure à cette clôture (au cas où l'id n'a pas été transmis).
+        ouvertureAssociee = State.comptages
+          .filter(x => x.type === 'fond' && normaliserNomCaisse(x.caisse) === normaliserNomCaisse(c.caisse) && (x.createdAt||0) <= (c.createdAt||0))
+          .sort((a,b) => (b.createdAt||0) - (a.createdAt||0))[0] || null;
+      }
+    }
+
+    const ticketsTries = ouvertureAssociee
+      ? ticketsEntreOuvertureEtCloture(c.caisse, ouvertureAssociee.createdAt || 0, c.createdAt || Date.now())
+      : State.tickets
+          .filter(t => t.caisse === c.caisse && t.service === c.service && t.date === c.date)
+          .sort((a,b) => (a.createdAt||0) - (b.createdAt||0));
+
+    const totauxParModeCycle = {};
+    let totalCycle = 0;
+    MODES_PAIEMENT.forEach(m => {
+      const somme = ticketsTries.reduce((s, t) => s + (t.mode === m.cle ? t.montant : 0), 0);
+      totauxParModeCycle[m.cle] = Math.round(somme * 100) / 100;
+      totalCycle += somme;
+    });
+    const lignesModesTickets = MODES_PAIEMENT.filter(m => (totauxParModeCycle[m.cle]||0) > 0).map(m => `
+      <tr><td>${m.icone} ${m.label}</td><td style="text-align:right;">${formatMontant(totauxParModeCycle[m.cle])}</td></tr>
     `).join('');
-    const ticketsTries = State.tickets
-      .filter(t => t.caisse === c.caisse && t.service === c.service && t.date === c.date)
-      .sort((a,b) => (a.createdAt||0) - (b.createdAt||0));
     const ligneTicketDetail = (t) => {
       const info = modeInfo(t.mode);
       return `<tr><td style="padding-left:10px; color:#6b6258;">${t.heure || ''} ${info.icone}${t.employe ? ' ' + t.employe.slice(0,6) : ''}</td><td style="text-align:right; color:#6b6258;">${formatMontant(t.montant)}</td></tr>`;
@@ -2464,17 +2518,21 @@ const Export = {
     const colonneTickets1 = ticketsTries.slice(0, milieuTickets).map(ligneTicketDetail).join('');
     const colonneTickets2 = ticketsTries.slice(milieuTickets).map(ligneTicketDetail).join('');
 
-    const ticketsHtml = (c.type === 'cloture' && totauxTickets.nbTickets > 0) ? `
-      <div class="section-title" style="margin-top:18px;">Tickets saisis (${totauxTickets.nbTickets}) — ${c.service}</div>
+    const sousTitreTickets = ouvertureAssociee
+      ? `de l'ouverture (${ouvertureAssociee.heure || formatDateHeure(ouvertureAssociee.createdAt)}) à la clôture (${c.heure || formatDateHeure(c.createdAt)})`
+      : c.service;
+
+    const ticketsHtml = (c.type === 'cloture' && ticketsTries.length > 0) ? `
+      <div class="section-title" style="margin-top:18px;">Tickets saisis (${ticketsTries.length}) — ${sousTitreTickets}</div>
       <table class="pdf-table">
         ${lignesModesTickets}
-        <tr style="font-weight:700;"><td>TOTAL TICKETS</td><td style="text-align:right;">${formatMontant(totauxTickets.total)}</td></tr>
+        <tr style="font-weight:700;"><td>TOTAL TICKETS</td><td style="text-align:right;">${formatMontant(Math.round(totalCycle*100)/100)}</td></tr>
       </table>
       <div class="detail-tickets">
         <table class="pdf-table">${colonneTickets1}</table>
         <table class="pdf-table">${colonneTickets2}</table>
       </div>
-    ` : (c.type === 'cloture' ? `<div class="helper-text" style="margin-top:14px;">Aucun ticket saisi pour cette caisse/service ce jour-là.</div>` : '');
+    ` : (c.type === 'cloture' ? `<div class="helper-text" style="margin-top:14px;">Aucun ticket saisi pendant ce cycle de caisse.</div>` : '');
 
     const win = window.open('', '_blank');
     win.document.write(`
