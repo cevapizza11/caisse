@@ -40,8 +40,8 @@ const EMPLOYES_DOC = "config/employes";
 /* ================================================================
    SECTION 2 — DÉNOMINATIONS (billets / pièces EUR)
    ================================================================ */
-const BILLETS = [100, 50, 20, 10, 5];
-const PIECES  = [2, 1, 0.5, 0.2, 0.1, 0.05];
+const BILLETS = [500, 200, 100, 50, 20, 10, 5];
+const PIECES  = [2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01];
 
 // Liste centrale des modes de paiement gérés par l'app. Toute la logique
 // (saisie tickets, rapprochement, écarts, exports) s'appuie sur cette liste
@@ -269,6 +269,32 @@ function donneesJourPour(date, caisse) {
     totalFondOuverture: Math.round(totalFondOuverture * 100) / 100,
     nbComptages: comptagesJour.length,
     nbTickets: ticketsJour.length
+  };
+}
+
+// Calcule, pour une date donnée, le montant à déposer au coffre/banque en
+// espèces pour chaque caisse clôturée ce jour-là, basé sur le montant cible
+// du fond de caisse défini dans les Réglages. Retourne le détail par caisse
+// ainsi que le total général toutes caisses confondues.
+function montantsADeposerPour(date) {
+  const clotures = State.comptages.filter(c => c.type === 'cloture' && c.date === date);
+  const parCaisse = clotures.map(c => {
+    const aDeposer = Math.max(0, (c.total || 0) - State.montantCibleFondCaisse);
+    return {
+      comptageId: c.id,
+      caisse: c.caisse,
+      heure: c.heure,
+      totalCompte: c.total || 0,
+      aDeposer: Math.round(aDeposer * 100) / 100,
+      manqueAuFond: c.total < State.montantCibleFondCaisse ? Math.round((State.montantCibleFondCaisse - c.total) * 100) / 100 : 0
+    };
+  }).sort((a,b) => (a.heure||'').localeCompare(b.heure||''));
+  const totalGeneral = parCaisse.reduce((s, x) => s + x.aDeposer, 0);
+  return {
+    date: date,
+    parCaisse: parCaisse,
+    totalGeneral: Math.round(totalGeneral * 100) / 100,
+    nbClotures: clotures.length
   };
 }
 
@@ -1205,6 +1231,18 @@ const Draft = {
       if (ouvertureDeReference) idOuvertureAssociee = ouvertureDeReference.id;
     }
 
+    // IMPORTANT : la fenêtre d'impression doit être ouverte ICI, AVANT tout
+    // `await`, sinon de nombreux navigateurs (Safari en particulier, mais
+    // aussi Chrome/Firefox selon les réglages) bloquent silencieusement
+    // window.open() s'il est appelé après une opération asynchrone — le
+    // clic initial n'est alors plus reconnu comme une vraie interaction
+    // utilisateur. On ouvre donc une fenêtre vide tout de suite, et on la
+    // remplit une fois la sauvegarde terminée.
+    let fenetreImpression = null;
+    if (estNouvelleCloture) {
+      fenetreImpression = window.open('', '_blank');
+    }
+
     const idComptage = await Sync.sauvegarderComptage(d);
     if (idComptage) {
       toast(d.id ? "Comptage modifié" : "Comptage enregistré ✓");
@@ -1219,13 +1257,17 @@ const Draft = {
       } else {
         Nav.go('nouveau');
       }
-      // Ouvre automatiquement la feuille de caisse prête à imprimer, avec le
+      // Remplit la fenêtre déjà ouverte avec la feuille de caisse, avec le
       // détail des tickets de l'ouverture à la clôture, juste après une
       // nouvelle clôture (pas à l'édition, pour ne pas réimprimer à chaque
       // petite correction ultérieure).
       if (estNouvelleCloture) {
-        Export.exporterPdf(idComptage, idOuvertureAssociee);
+        Export.exporterPdf(idComptage, idOuvertureAssociee, fenetreImpression);
       }
+    } else if (fenetreImpression) {
+      // La sauvegarde a échoué : on ferme la fenêtre vide ouverte en avance
+      // pour ne pas laisser un onglet blanc inutile (si elle a pu s'ouvrir).
+      try { fenetreImpression.close(); } catch (e) {}
     }
   }
 };
@@ -1633,6 +1675,33 @@ function renderEcranHistorique() {
     </div>
   `;
 
+  const depots = montantsADeposerPour(State.rapportDate);
+  const carteDepot = `
+    <div class="card" style="border-color:var(--teal-light); background:#f5faf9;">
+      <div class="card-title" style="color:var(--teal-dark);">💰 À déposer au coffre/banque — ${formatDate(State.rapportDate)}</div>
+      ${depots.nbClotures === 0 ? `
+        <div class="helper-text" style="margin-bottom:0;">Aucune clôture enregistrée pour cette date. Change la date ci-dessus (carte Rapport journalier) pour voir un autre jour.</div>
+      ` : `
+        ${depots.parCaisse.map(d => `
+          <div class="hist-item" style="cursor:default; background:#fff;">
+            <div class="hist-main">
+              <div class="hist-titre">${d.caisse}</div>
+              <div class="hist-meta">${d.heure || ''} · Total compté ${formatMontant(d.totalCompte)}</div>
+            </div>
+            <div class="hist-right">
+              <div class="hist-montant" style="color:var(--teal-dark);">${formatMontant(d.aDeposer)}</div>
+              ${d.manqueAuFond > 0 ? `<div class="hist-badge bad">manque ${formatMontant(d.manqueAuFond)}</div>` : ''}
+            </div>
+          </div>
+        `).join('')}
+        <div style="margin-top:12px; padding-top:12px; border-top:1.5px solid var(--teal-light); display:flex; align-items:center; justify-content:space-between;">
+          <span style="font-weight:700; text-transform:uppercase; letter-spacing:.5px; font-size:12px; color:var(--teal-dark);">Total à déposer (toutes caisses)</span>
+          <span style="font-family:'Cormorant',serif; font-size:28px; font-weight:700; color:var(--teal-dark);">${formatMontant(depots.totalGeneral)}</span>
+        </div>
+      `}
+    </div>
+  `;
+
   const chipsHtml = chipsCaisses.map(c => `
     <button class="filter-chip ${State.historyFilter.caisse===c?'active':''}" onclick="Hist.setFiltreCaisse('${c}')">
       ${c === 'toutes' ? 'Toutes les caisses' : c}
@@ -1645,6 +1714,7 @@ function renderEcranHistorique() {
   if (list.length === 0) {
     return `
       ${carteRapport}
+      ${carteDepot}
       <div class="filter-bar">${chipsHtml}</div>
       <div class="filter-bar">${chipsPeriode}</div>
       <div class="empty-state">
@@ -1674,6 +1744,7 @@ function renderEcranHistorique() {
 
   return `
     ${carteRapport}
+    ${carteDepot}
     <div class="filter-bar">${chipsHtml}</div>
     <div class="filter-bar">${chipsPeriode}</div>
     <button class="btn btn-secondary" style="margin-bottom:14px;" onclick="Export.exporterExcel()">📊 Exporter en Excel (${list.length} comptage${list.length>1?'s':''})</button>
@@ -2445,7 +2516,7 @@ const Export = {
     toast("Export Excel généré");
   },
 
-  exporterPdf(id, idOuvertureAssociee) {
+  exporterPdf(id, idOuvertureAssociee, fenetrePreOuverte) {
     const c = State.comptages.find(x => x.id === id);
     if (!c) { toast("Comptage introuvable", true); return; }
     const denomQte = c.denomQte || {};
@@ -2549,7 +2620,15 @@ const Export = {
       </div>
     ` : (c.type === 'cloture' ? `<div class="helper-text" style="margin-top:14px;">Aucun ticket saisi pendant ce cycle de caisse.</div>` : '');
 
-    const win = window.open('', '_blank');
+    // Si une fenêtre a déjà été ouverte en amont (cas de l'impression
+    // automatique à la clôture, pour éviter le blocage popup des
+    // navigateurs sur les ouvertures asynchrones), on la réutilise.
+    // Sinon (bouton manuel "Imprimer", clic direct), on en ouvre une.
+    const win = fenetrePreOuverte || window.open('', '_blank');
+    if (!win) {
+      toast("La fenêtre d'impression a été bloquée par le navigateur — autorise les popups pour ce site", true);
+      return;
+    }
     win.document.write(`
       <!DOCTYPE html>
       <html lang="fr">
