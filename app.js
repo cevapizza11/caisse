@@ -104,7 +104,8 @@ const State = {
   statsPeriode: '30j', // période pour l'écran Stats et les alertes d'écarts récurrents
   statsDateDebut: null, // utilisé si statsPeriode === 'perso'
   statsDateFin: null,
-  seuilAlertesRecurrentes: 2 // nb d'écarts jaunes+rouges déclenchant une alerte récurrence
+  seuilAlertesRecurrentes: 2, // nb d'écarts jaunes+rouges déclenchant une alerte récurrence
+  delaiInactiviteMinutes: 15  // délai avant déconnexion auto (0 = désactivé)
 };
 
 const SESSION_KEY = 'caisseMarmiteEmployeActif';
@@ -372,6 +373,7 @@ const Auth = {
       const nom = localStorage.getItem(SESSION_KEY);
       if (nom && State.employes.find(e => e.nom === nom)) {
         State.employeActif = { nom };
+        Minuteur.relancer(); // relance le minuteur pour la session restaurée
         return true;
       }
     } catch (e) { /* localStorage indisponible, on ignore */ }
@@ -429,6 +431,7 @@ const Auth = {
       State.draft = nouveauDraft();
       Nav.updateActiveTab(State.currentScreen);
       Render.screen();
+      Minuteur.relancer(); // démarre le minuteur d'inactivité après connexion
     } else {
       toast("Code incorrect", true);
       this.pinSaisi = "";
@@ -439,6 +442,7 @@ const Auth = {
   changerUtilisateur() {
     State.employeActif = null;
     try { localStorage.removeItem(SESSION_KEY); } catch(e) {}
+    Minuteur.stopper(); // stoppe le minuteur à la déconnexion manuelle
     this.employeChoisi = null;
     Nav.updateActiveTab(State.currentScreen);
     this.ouvrirEcranConnexion();
@@ -841,6 +845,7 @@ const Sync = {
         if (data.services && data.services.length) State.services = data.services;
         if (data.seuilEcartAlerte !== undefined) State.seuilEcartAlerte = data.seuilEcartAlerte;
         if (data.montantCibleFondCaisse !== undefined) State.montantCibleFondCaisse = data.montantCibleFondCaisse;
+        if (data.delaiInactiviteMinutes !== undefined) State.delaiInactiviteMinutes = data.delaiInactiviteMinutes;
       }
     } catch (e) {
       console.error("Erreur chargement config :", e);
@@ -885,7 +890,8 @@ const Sync = {
         caisses: State.caisses,
         services: State.services,
         seuilEcartAlerte: State.seuilEcartAlerte,
-        montantCibleFondCaisse: State.montantCibleFondCaisse
+        montantCibleFondCaisse: State.montantCibleFondCaisse,
+        delaiInactiviteMinutes: State.delaiInactiviteMinutes
       });
       toast("Réglages enregistrés");
     } catch (e) {
@@ -2179,6 +2185,14 @@ function renderEcranReglages() {
       <div class="helper-text">À la clôture, l'app calcule combien retirer du tiroir pour ramener la caisse à ce montant, prêt pour la prochaine ouverture.</div>
     </div>
 
+    <div class="card">
+      <div class="card-title">Déconnexion automatique par inactivité</div>
+      <label>Délai d'inactivité avant déconnexion (minutes) — 0 pour désactiver</label>
+      <input type="number" inputmode="numeric" step="1" min="0" value="${State.delaiInactiviteMinutes}"
+             onchange="Reglages.setDelaiInactivite(this.value)">
+      <div class="helper-text">Si aucune interaction pendant ce délai, l'app redemande le PIN de connexion. Pratique pour sécuriser les caisses entre deux utilisateurs. Mettre 0 pour désactiver complètement.</div>
+    </div>
+
     <div class="helper-text" style="text-align:center; margin-top:4px;">✓ Toutes les modifications sont enregistrées automatiquement</div>
 
     <div class="divider-text">À propos</div>
@@ -2222,6 +2236,13 @@ const Reglages = {
   setMontantCible(value) {
     const v = parseFloat(value);
     State.montantCibleFondCaisse = isNaN(v) ? 0 : Math.max(0, v);
+    Sync.sauvegarderConfig();
+  },
+
+  setDelaiInactivite(value) {
+    const v = parseInt(value, 10);
+    State.delaiInactiviteMinutes = isNaN(v) ? 0 : Math.max(0, v);
+    Minuteur.relancer(); // repart avec le nouveau délai immédiatement
     Sync.sauvegarderConfig();
   },
 
@@ -2734,6 +2755,43 @@ const Render = {
 /* ================================================================
    SECTION 14 — INITIALISATION
    ================================================================ */
+/* ================================================================
+   MODULE MINUTEUR D'INACTIVITÉ
+   Déclenche une déconnexion automatique si aucune interaction
+   n'est détectée pendant le délai configuré dans les Réglages.
+   Le minuteur se relance à chaque clic ou toucher sur l'app.
+   ================================================================ */
+const Minuteur = {
+  _timer: null,
+
+  // Relance le minuteur. Appelé à chaque interaction (clic, toucher)
+  // et à chaque changement de délai dans les Réglages.
+  relancer() {
+    if (this._timer) clearTimeout(this._timer);
+    const delaiMs = State.delaiInactiviteMinutes * 60 * 1000;
+    if (delaiMs <= 0 || !State.employeActif) return;
+    this._timer = setTimeout(() => this._expirer(), delaiMs);
+  },
+
+  // Stoppe le minuteur (à la déconnexion manuelle, pour éviter un double
+  // déclenchement si l'utilisateur se déconnecte avant l'expiration).
+  stopper() {
+    if (this._timer) clearTimeout(this._timer);
+    this._timer = null;
+  },
+
+  _expirer() {
+    if (!State.employeActif) return;
+    const nom = State.employeActif.nom;
+    State.employeActif = null;
+    localStorage.removeItem(SESSION_KEY);
+    this._timer = null;
+    toast(nom + " — déconnecté automatiquement après inactivité");
+    Nav.updateActiveTab('nouveau');
+    Auth.ouvrirEcranConnexion();
+  }
+};
+
 async function initApp() {
   State.draft = nouveauDraft();
   Nav.updateActiveTab('nouveau');
@@ -2774,6 +2832,14 @@ async function initApp() {
     Render.screen();
   } else {
     Nav.updateActiveTab(State.currentScreen);
+  }
+
+  // Écoute tous les clics/touches sur l'app pour relancer le minuteur
+  // d'inactivité à chaque interaction de l'utilisateur.
+  if (typeof document !== 'undefined' && document.addEventListener) {
+    ['click', 'touchstart', 'keydown'].forEach(evt => {
+      document.addEventListener(evt, () => Minuteur.relancer(), { passive: true });
+    });
   }
 
   // Réécoute les changements de connectivité du navigateur pour resynchroniser
