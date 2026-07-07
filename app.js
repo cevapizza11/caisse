@@ -2763,9 +2763,12 @@ const Render = {
    ================================================================ */
 const Minuteur = {
   _timer: null,
+  _timerNuit: null,
+  _HEURE_REMISE_A_ZERO: 5, // 5h du matin
+  _CLE_REMISE: 'caisseMarmiteRemiseZeroDate', // date de la dernière remise en localStorage
 
-  // Relance le minuteur. Appelé à chaque interaction (clic, toucher)
-  // et à chaque changement de délai dans les Réglages.
+  // Relance le minuteur d'inactivité. Appelé à chaque interaction (clic,
+  // toucher) et à chaque changement de délai dans les Réglages.
   relancer() {
     if (this._timer) clearTimeout(this._timer);
     const delaiMs = State.delaiInactiviteMinutes * 60 * 1000;
@@ -2773,8 +2776,7 @@ const Minuteur = {
     this._timer = setTimeout(() => this._expirer(), delaiMs);
   },
 
-  // Stoppe le minuteur (à la déconnexion manuelle, pour éviter un double
-  // déclenchement si l'utilisateur se déconnecte avant l'expiration).
+  // Stoppe le minuteur d'inactivité (à la déconnexion manuelle).
   stopper() {
     if (this._timer) clearTimeout(this._timer);
     this._timer = null;
@@ -2789,6 +2791,65 @@ const Minuteur = {
     toast(nom + " — déconnecté automatiquement après inactivité");
     Nav.updateActiveTab('nouveau');
     Auth.ouvrirEcranConnexion();
+  },
+
+  // Vérifie si la remise à zéro quotidienne (5h) doit être déclenchée,
+  // et programme le prochain déclenchement. Appelé au démarrage de l'app
+  // et à chaque reprise de focus (visibilitychange).
+  verifierRemiseQuotidienne() {
+    if (this._timerNuit) clearTimeout(this._timerNuit);
+
+    const maintenant = new Date();
+    const dateAujourdhui = maintenant.toISOString().slice(0, 10);
+    const derniereRemise = localStorage.getItem(this._CLE_REMISE) || '';
+
+    // Si on est après 5h et qu'on n'a pas encore fait la remise aujourd'hui,
+    // on la déclenche immédiatement.
+    if (maintenant.getHours() >= this._HEURE_REMISE_A_ZERO && derniereRemise !== dateAujourdhui) {
+      this._remettreAZero();
+    }
+
+    // Programme le prochain déclenchement à 5h (demain si on est déjà passé 5h,
+    // aujourd'hui sinon).
+    const prochaine5h = new Date(maintenant);
+    if (maintenant.getHours() >= this._HEURE_REMISE_A_ZERO) {
+      prochaine5h.setDate(prochaine5h.getDate() + 1);
+    }
+    prochaine5h.setHours(this._HEURE_REMISE_A_ZERO, 0, 5, 0); // 05:00:05 pour éviter les micro-décalages
+    const msAvant5h = prochaine5h - maintenant;
+
+    this._timerNuit = setTimeout(() => {
+      this._remettreAZero();
+      this.verifierRemiseQuotidienne(); // reprogramme pour le lendemain
+    }, msAvant5h);
+  },
+
+  _remettreAZero() {
+    const dateAujourdhui = new Date().toISOString().slice(0, 10);
+    localStorage.setItem(this._CLE_REMISE, dateAujourdhui);
+
+    // 1. Remet la date du contexte Tickets sur aujourd'hui, pour que l'écran
+    //    repart sur une page vierge du jour (plus de tickets de la veille).
+    if (State.ticketContexte) {
+      State.ticketContexte.date = dateAujourdhui;
+    }
+
+    // 2. Déconnecte tous les employés — chacun devra rerentrer son PIN.
+    if (State.employeActif) {
+      State.employeActif = null;
+      localStorage.removeItem(SESSION_KEY);
+      this.stopper();
+      toast("Bonne journée ! Remise à zéro automatique des caisses à 5h — reconnectez-vous pour commencer.");
+      Nav.updateActiveTab('nouveau');
+      Auth.ouvrirEcranConnexion();
+    } else {
+      // Même sans employé connecté, on remet la date à jour pour que la
+      // prochaine personne qui se connecte parte sur la bonne date.
+      if (State.ticketContexte) {
+        if (!State.draft) State.draft = nouveauDraft();
+        Render.screen();
+      }
+    }
   }
 };
 
@@ -2840,7 +2901,17 @@ async function initApp() {
     ['click', 'touchstart', 'keydown'].forEach(evt => {
       document.addEventListener(evt, () => Minuteur.relancer(), { passive: true });
     });
+    // Quand l'utilisateur revient sur l'onglet (ex: app laissée ouverte la
+    // nuit), on re-vérifie si la remise à zéro quotidienne est due.
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        Minuteur.verifierRemiseQuotidienne();
+      }
+    });
   }
+
+  // Lance la vérification de remise à zéro quotidienne (5h du matin)
+  Minuteur.verifierRemiseQuotidienne();
 
   // Réécoute les changements de connectivité du navigateur pour resynchroniser
   // automatiquement dès que le réseau revient, sans attendre une action de l'utilisateur.
