@@ -455,7 +455,7 @@ const Auth = {
     if (State.employes.length === 0) {
       el.innerHTML = `
         <div class="login-box">
-          <div class="login-logo">🦪</div>
+          <div class="login-logo"></div>
           <h2 style="color:#fff; margin-bottom:6px;">Comptage Caisse</h2>
           <p style="color:#bcd6d4; font-size:13px; margin-bottom:20px;">
             Aucun employé n'est encore configuré.<br>Ajoute-en au moins un dans Réglages.
@@ -471,7 +471,7 @@ const Auth = {
       `).join('');
       el.innerHTML = `
         <div class="login-box">
-          <div class="login-logo">🦪</div>
+          <div class="login-logo"></div>
           <h2 style="color:#fff; margin-bottom:18px;">Qui es-tu ?</h2>
           <div class="login-employe-list">${boutons}</div>
         </div>`;
@@ -487,7 +487,7 @@ const Auth = {
 
     el.innerHTML = `
       <div class="login-box">
-        <div class="login-logo">🦪</div>
+        <div class="login-logo"></div>
         <h2 style="color:#fff; margin-bottom:4px;">${this.employeChoisi}</h2>
         <p style="color:#bcd6d4; font-size:13px; margin-bottom:18px;">Entre ton code à 4 chiffres</p>
         <div class="pin-dots">${dots}</div>
@@ -2198,7 +2198,7 @@ function renderEcranReglages() {
     <div class="divider-text">À propos</div>
     <div class="card" style="text-align:center;">
       <div style="font-size:13px; color:var(--ink-soft); line-height:1.6;">
-        Comptage Caisse — La Marmite Bleue<br>
+        Comptage Caisse — Smoke & Smile<br>
         Données synchronisées via Firebase<br>
         <span id="versionTag">v1.0</span>
       </div>
@@ -2416,7 +2416,7 @@ const Export = {
       </style>
       </head>
       <body>
-        <h1>🦪 La Marmite Bleue — Rapport journalier</h1>
+        <h1>Smoke &amp; Smile — Rapport journalier</h1>
         <div class="sub">${formatDate(date)} — ${caisse ? caisse : 'Toutes les caisses'}</div>
 
         ${blocs}
@@ -2426,7 +2426,7 @@ const Export = {
 
         <div class="meta">
           <span>Généré le ${formatDateHeure(Date.now())} par ${State.employeActif ? State.employeActif.nom : '—'}</span>
-          <span>La Marmite Bleue</span>
+          <span>Smoke & Smile</span>
         </div>
 
         <script>window.onload = function(){ window.print(); };</script>
@@ -2466,7 +2466,7 @@ const Export = {
       </style>
       </head>
       <body>
-        <h1>🦪 La Marmite Bleue — Reçu petite caisse</h1>
+        <h1>Smoke &amp; Smile — Reçu petite caisse</h1>
         <div class="sub">Justificatif interne de sortie d'argent — pas un ticket de vente</div>
 
         <table class="pdf-table">
@@ -2682,7 +2682,7 @@ const Export = {
       </style>
       </head>
       <body>
-        <h1>🦪 La Marmite Bleue — État de caisse</h1>
+        <h1>Smoke &amp; Smile — État de caisse</h1>
         <div class="sub">${c.caisse} · ${c.type === 'fond' ? 'Ouverture' : 'Clôture'} · ${formatDateHeure(c.createdAt || Date.now())} · ${c.service}${c.employe ? ' · Compté par ' + c.employe : ''}</div>
 
         ${lignesBillets ? `<div class="section-title">Billets</div><table class="pdf-table">${lignesBillets}</table>` : ''}
@@ -2697,7 +2697,7 @@ const Export = {
 
         <div class="meta">
           <span>Document généré le ${formatDateHeure(Date.now())}</span>
-          <span>La Marmite Bleue</span>
+          <span>Smoke & Smile</span>
         </div>
 
         <script>window.onload = function(){ window.print(); };</script>
@@ -2742,7 +2742,7 @@ const Render = {
         historique: 'Historique des comptages',
         stats: "Statistiques d'écarts",
         reglages: 'Réglages'
-      }[State.currentScreen] || 'La Marmite Bleue';
+      }[State.currentScreen] || 'Smoke & Smile';
       sub.textContent = titreEcran;
     }
     const userBtn = document.getElementById('userPill');
