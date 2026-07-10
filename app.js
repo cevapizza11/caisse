@@ -40,8 +40,91 @@ const EMPLOYES_DOC = "config/employes";
 /* ================================================================
    SECTION 2 — DÉNOMINATIONS (billets / pièces EUR)
    ================================================================ */
-const BILLETS = [100, 50, 20, 10, 5];
-const PIECES  = [2, 1, 0.5, 0.2, 0.1, 0.05];
+const BILLETS = [500, 200, 100, 50, 20, 10, 5];
+
+// Définition des deux établissements : identité visuelle, nom, clé.
+// Chaque employé est rattaché à l'un d'eux ; toutes les données sont
+// taguées avec la clé d'établissement pour les isoler logiquement.
+const ETABLISSEMENTS = {
+  smoke: {
+    cle: 'smoke',
+    nom: 'Smoke & Smile',
+    vars: {
+      '--terracotta':     '#22863a',
+      '--terracotta-dark':'#176929',
+      '--ivoire':         '#f4f6f4',
+      '--ivoire-dark':    '#e0e8e1',
+      '--teal':           '#1a7a3c',
+      '--teal-dark':      '#0f4f26',
+      '--teal-light':     '#28a745',
+      '--ink':            '#1a1a1a',
+      '--ink-soft':       '#4a5a4a',
+      '--border':         '#c8dbc8',
+      '--shadow':         '0 2px 10px rgba(10,30,15,0.10)',
+      '--shadow-lg':      '0 8px 28px rgba(10,30,15,0.16)',
+    },
+    topbarBg:    '#111',
+    topbarSub:   '#28a745',
+    navBg:       '#111',
+    navBorder:   '#222',
+    navActive:   '#28a745',
+  },
+  moule: {
+    cle: 'moule',
+    nom: 'Moule & Smile',
+    vars: {
+      '--terracotta':     '#b8860b',
+      '--terracotta-dark':'#8b6508',
+      '--ivoire':         '#1a1a1a',
+      '--ivoire-dark':    '#242424',
+      '--teal':           '#d4a017',
+      '--teal-dark':      '#c8960c',
+      '--teal-light':     '#f0c040',
+      '--ink':            '#f5f0e0',
+      '--ink-soft':       '#b0a070',
+      '--border':         '#3a3020',
+      '--shadow':         '0 2px 10px rgba(0,0,0,0.40)',
+      '--shadow-lg':      '0 8px 28px rgba(0,0,0,0.60)',
+    },
+    topbarBg:    '#0a0a0a',
+    topbarSub:   '#d4a017',
+    navBg:       '#0a0a0a',
+    navBorder:   '#2a2010',
+    navActive:   '#d4a017',
+  }
+};
+
+// Applique le thème visuel d'un établissement en modifiant les variables
+// CSS à la racine du document — changement instantané, sans rechargement.
+function appliquerTheme(etablissementCle) {
+  const etab = ETABLISSEMENTS[etablissementCle] || ETABLISSEMENTS.smoke;
+  const root = document.documentElement.style;
+  Object.entries(etab.vars).forEach(([k, v]) => root.setProperty(k, v));
+  // Topbar
+  const topbar = document.querySelector('.topbar');
+  if (topbar) topbar.style.background = etab.topbarBg;
+  const topbarSub = document.getElementById('topbarSub');
+  if (topbarSub) {
+    topbarSub.textContent = etab.nom;
+    topbarSub.style.color = etab.topbarSub;
+  }
+  // Bottom-nav
+  const nav = document.querySelector('.bottom-nav');
+  if (nav) {
+    nav.style.background = etab.navBg;
+    nav.style.borderTopColor = etab.navBorder;
+  }
+  // Titre dans la topbar (h1)
+  const h1 = document.querySelector('.topbar h1');
+  if (h1) h1.textContent = 'Comptage Caisse';
+  // Met à jour l'onglet actif (couleur)
+  document.querySelectorAll('.nav-item.active').forEach(el => {
+    el.style.color = etab.navActive;
+  });
+}
+
+
+const PIECES  = [2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01];
 
 // Liste centrale des modes de paiement gérés par l'app. Toute la logique
 // (saisie tickets, rapprochement, écarts, exports) s'appuie sur cette liste
@@ -82,6 +165,7 @@ function uid() {
    ================================================================ */
 const State = {
   currentScreen: 'nouveau',
+  etablissement: 'smoke',  // établissement actuellement actif : 'smoke' | 'moule'
   caisses: ["Caisse 1", "Caisse 2", "Bar"],
   services: ["Service midi", "Service soir", "Journée complète"],
   employes: [],         // [{nom, pin}] chargés depuis Firestore
@@ -117,6 +201,7 @@ function nouveauDraft() {
   PIECES.forEach(p => denomQte['p' + p] = 0);
   return {
     id: null,
+    etablissement: State.etablissement, // 'smoke' | 'moule'
     date: new Date().toISOString().slice(0,10),
     heure: new Date().toTimeString().slice(0,5),
     caisse: State.caisses[0] || "Caisse 1",
@@ -373,6 +458,9 @@ const Auth = {
       const nom = localStorage.getItem(SESSION_KEY);
       if (nom && State.employes.find(e => e.nom === nom)) {
         State.employeActif = { nom };
+        const etab = localStorage.getItem('caisseMarmiteEtablissement') || 'smoke';
+        State.etablissement = etab;
+        appliquerTheme(etab);
         Minuteur.relancer(); // relance le minuteur pour la session restaurée
         return true;
       }
@@ -424,7 +512,13 @@ const Auth = {
     const emp = State.employes.find(e => e.nom === this.employeChoisi);
     if (emp && emp.pin === this.pinSaisi) {
       State.employeActif = { nom: emp.nom };
-      try { localStorage.setItem(SESSION_KEY, emp.nom); } catch(e) {}
+      // Applique l'établissement de l'employé et le thème visuel correspondant
+      State.etablissement = emp.etablissement || 'smoke';
+      appliquerTheme(State.etablissement);
+      try {
+        localStorage.setItem(SESSION_KEY, emp.nom);
+        localStorage.setItem('caisseMarmiteEtablissement', State.etablissement);
+      } catch(e) {}
       this.employeChoisi = null;
       this.pinSaisi = "";
       this.fermerEcranConnexion();
@@ -441,7 +535,10 @@ const Auth = {
 
   changerUtilisateur() {
     State.employeActif = null;
-    try { localStorage.removeItem(SESSION_KEY); } catch(e) {}
+    try {
+      localStorage.removeItem(SESSION_KEY);
+      localStorage.removeItem('caisseMarmiteEtablissement');
+    } catch(e) {}
     Minuteur.stopper(); // stoppe le minuteur à la déconnexion manuelle
     this.employeChoisi = null;
     Nav.updateActiveTab(State.currentScreen);
@@ -629,7 +726,11 @@ const Sync = {
     this.setStatus('busy');
     try {
       const snap = await db.collection(COLLECTION).orderBy('createdAt', 'desc').limit(500).get();
-      State.comptages = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      const tous = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      // Filtre par établissement : un employé ne voit que les données de
+      // son établissement. Les anciens documents sans champ etablissement
+      // sont inclus pour rétrocompatibilité (migration en douceur).
+      State.comptages = tous.filter(c => !c.etablissement || c.etablissement === State.etablissement);
       this.setStatus('ok');
     } catch (e) {
       console.error("Erreur chargement comptages :", e);
@@ -655,6 +756,7 @@ const Sync = {
         service: draft.service,
         type: draft.type,
         employe: draft.employe || "Non renseigné",
+        etablissement: draft.etablissement || State.etablissement,
         denomQte: draft.denomQte,
         caTheorique: draft.caTheorique === "" ? null : draft.caTheorique,
         caTheoriqueCB: draft.caTheoriqueCB === "" ? null : draft.caTheoriqueCB,
@@ -708,7 +810,8 @@ const Sync = {
     if (!firebaseReady) { return; }
     try {
       const snap = await db.collection(TICKETS_COLLECTION).orderBy('createdAt', 'desc').limit(2000).get();
-      State.tickets = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      const tous = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      State.tickets = tous.filter(t => !t.etablissement || t.etablissement === State.etablissement);
     } catch (e) {
       console.error("Erreur chargement tickets :", e);
       toast("Impossible de charger les tickets", true);
@@ -724,6 +827,7 @@ const Sync = {
       mode: ticket.mode,
       montant: Math.round(parseFloat(ticket.montant) * 100) / 100,
       employe: ticket.employe || "Non renseigné",
+      etablissement: State.etablissement,
       createdAt: Date.now()
     };
 
@@ -783,7 +887,8 @@ const Sync = {
     if (!firebaseReady) return;
     try {
       const snap = await db.collection(PETITE_CAISSE_COLLECTION).orderBy('createdAt', 'desc').limit(500).get();
-      State.petiteCaisse = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      const tous = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      State.petiteCaisse = tous.filter(s => !s.etablissement || s.etablissement === State.etablissement);
     } catch (e) {
       console.error("Erreur chargement petite caisse :", e);
       toast("Impossible de charger la petite caisse", true);
@@ -800,6 +905,7 @@ const Sync = {
         montant: Math.round(parseFloat(sortie.montant) * 100) / 100,
         motif: sortie.motif || "",
         employe: sortie.employe || "Non renseigné",
+        etablissement: State.etablissement,
         justificatifBase64: sortie.justificatifBase64 || null,
         createdAt: sortie.createdAt || Date.now()
       };
@@ -2133,11 +2239,20 @@ function renderListeEmployes() {
     return `<div class="helper-text" style="margin-bottom:10px;">Aucun employé configuré — l'app sera accessible sans code.</div>`;
   }
   return State.employes.map((e, i) => `
-    <div class="denom-row" style="padding:6px 0;">
-      <input type="text" value="${e.nom}" placeholder="Nom" style="margin-bottom:0; flex:2;" onchange="Reglages.modifierEmploye(${i}, 'nom', this.value)">
-      <input type="text" inputmode="numeric" maxlength="4" value="${e.pin}" placeholder="PIN" style="margin-bottom:0; flex:1; text-align:center;" onchange="Reglages.modifierEmploye(${i}, 'pin', this.value)">
-      <button class="btn-icon admin-toggle ${e.admin ? 'active' : ''}" title="${e.admin ? 'Administrateur — clique pour retirer' : 'Donner les droits administrateur'}" onclick="Reglages.toggleAdmin(${i})">${e.admin ? '👑' : '🔒'}</button>
-      <button class="btn-icon" style="background:var(--ivoire-dark); color:var(--ecart-bad); margin-left:8px;" onclick="Reglages.supprimerEmploye(${i})">✕</button>
+    <div style="padding:8px 0; border-bottom:1px solid var(--border);">
+      <div class="denom-row" style="padding:0 0 6px;">
+        <input type="text" value="${e.nom}" placeholder="Nom" style="margin-bottom:0; flex:2;" onchange="Reglages.modifierEmploye(${i}, 'nom', this.value)">
+        <input type="text" inputmode="numeric" maxlength="4" value="${e.pin}" placeholder="PIN" style="margin-bottom:0; flex:1; text-align:center;" onchange="Reglages.modifierEmploye(${i}, 'pin', this.value)">
+        <button class="btn-icon admin-toggle ${e.admin ? 'active' : ''}" title="${e.admin ? 'Administrateur' : 'Donner les droits administrateur'}" onclick="Reglages.toggleAdmin(${i})">${e.admin ? '👑' : '🔒'}</button>
+        <button class="btn-icon" style="background:var(--ivoire-dark); color:var(--ecart-bad); margin-left:4px;" onclick="Reglages.supprimerEmploye(${i})">✕</button>
+      </div>
+      <div class="denom-row" style="padding:0;">
+        <span class="helper-text" style="margin-bottom:0; flex:1;">Établissement :</span>
+        <select style="margin-bottom:0; flex:2;" onchange="Reglages.modifierEmploye(${i}, 'etablissement', this.value)">
+          <option value="smoke" ${(e.etablissement||'smoke')==='smoke' ? 'selected' : ''}>🟢 Smoke &amp; Smile</option>
+          <option value="moule" ${(e.etablissement||'smoke')==='moule' ? 'selected' : ''}>✨ Moule &amp; Smile</option>
+        </select>
+      </div>
     </div>
   `).join('');
 }
@@ -2854,6 +2969,14 @@ const Minuteur = {
 };
 
 async function initApp() {
+  // Applique le thème sauvegardé dès que possible (avant même le chargement
+  // des données) pour éviter un flash de la couleur par défaut.
+  try {
+    const etabSauvegarde = localStorage.getItem('caisseMarmiteEtablissement') || 'smoke';
+    State.etablissement = etabSauvegarde;
+    appliquerTheme(etabSauvegarde);
+  } catch(e) {}
+
   State.draft = nouveauDraft();
   Nav.updateActiveTab('nouveau');
 
