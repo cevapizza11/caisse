@@ -40,7 +40,8 @@ const EMPLOYES_DOC = "config/employes";
 /* ================================================================
    SECTION 2 — DÉNOMINATIONS (billets / pièces EUR)
    ================================================================ */
-const BILLETS = [100, 50, 20, 10, 5];
+const BILLETS_TOUS  = [500, 200, 100, 50, 20, 10, 5];
+const PIECES_TOUTES = [2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01];
 
 // Définition des deux établissements : identité visuelle, nom, clé.
 // Chaque employé est rattaché à l'un d'eux ; toutes les données sont
@@ -100,6 +101,8 @@ function appliquerTheme(etablissementCle) {
   const etab = ETABLISSEMENTS[etablissementCle] || ETABLISSEMENTS.smoke;
   const root = document.documentElement.style;
   Object.entries(etab.vars).forEach(([k, v]) => root.setProperty(k, v));
+  // Met à jour la liste des modes de paiement selon l'établissement
+  MODES_PAIEMENT = getModesPaiement();
   // Topbar
   const topbar = document.querySelector('.topbar');
   if (topbar) topbar.style.background = etab.topbarBg;
@@ -124,21 +127,44 @@ function appliquerTheme(etablissementCle) {
 }
 
 
-const PIECES  = [2, 1, 0.5, 0.2, 0.1, 0.05];
-
-// Liste centrale des modes de paiement gérés par l'app. Toute la logique
-// (saisie tickets, rapprochement, écarts, exports) s'appuie sur cette liste
-// plutôt que de coder chaque mode en dur, pour faciliter l'ajout futur.
-const MODES_PAIEMENT = [
+// Liste COMPLÈTE des modes de paiement (tous établissements confondus).
+const TOUS_MODES_PAIEMENT = [
   { cle: 'especes',        label: 'Espèces',          icone: '💶', champTheorique: 'caTheorique',   champEcart: 'ecart',   compteEspeces: true },
   { cle: 'cb',              label: 'CB',                icone: '💳', champTheorique: 'caTheoriqueCB', champEcart: 'ecartCB', compteEspeces: false },
   { cle: 'titrerestaurant', label: 'Titre-restaurant', icone: '🍽️', champTheorique: 'caTheoriqueTR', champEcart: 'ecartTR', compteEspeces: false },
   { cle: 'chequevacances',  label: 'Chèque-vacances',  icone: '🏖️', champTheorique: 'caTheoriqueCV', champEcart: 'ecartCV', compteEspeces: false },
   { cle: 'cheque',          label: 'Chèque',            icone: '📝', champTheorique: 'caTheoriqueCQ', champEcart: 'ecartCQ', compteEspeces: false }
 ];
-function modeInfo(cle) {
-  return MODES_PAIEMENT.find(m => m.cle === cle) || MODES_PAIEMENT[0];
+
+// Retourne la liste de billets pour l'établissement actif.
+function getBillets() {
+  if (State.etablissement === 'smoke') return [100, 50, 20, 10, 5];
+  return BILLETS_TOUS; // moule : tous les billets
 }
+
+// Retourne la liste de pièces pour l'établissement actif.
+function getPieces() {
+  if (State.etablissement === 'smoke') return [2, 1, 0.5, 0.2, 0.1, 0.05];
+  return PIECES_TOUTES; // moule : toutes les pièces
+}
+
+// Retourne les modes de paiement pour l'établissement actif.
+// Smoke & Smile : pas de titre-restaurant ni chèque-vacances (vape shop).
+function getModesPaiement() {
+  if (State.etablissement === 'smoke') {
+    return TOUS_MODES_PAIEMENT.filter(m => !['titrerestaurant', 'chequevacances'].includes(m.cle));
+  }
+  return TOUS_MODES_PAIEMENT; // moule : tous les modes
+}
+
+// Alias dynamique — initialisé avec la liste complète par défaut.
+// appliquerTheme() le met à jour à chaque changement d'établissement.
+let MODES_PAIEMENT = TOUS_MODES_PAIEMENT.slice();
+
+function modeInfo(cle) {
+  return TOUS_MODES_PAIEMENT.find(m => m.cle === cle) || TOUS_MODES_PAIEMENT[0];
+}
+
 
 function formatMontant(n) {
   if (isNaN(n)) n = 0;
@@ -197,8 +223,8 @@ const QUEUE_KEY = 'caisseMarmiteFileTicketsEnAttente';
 
 function nouveauDraft() {
   const denomQte = {};
-  BILLETS.forEach(b => denomQte['b' + b] = 0);
-  PIECES.forEach(p => denomQte['p' + p] = 0);
+  BILLETS_TOUS.forEach(b => denomQte["b" + b] = 0);
+  PIECES_TOUTES.forEach(p => denomQte["p" + p] = 0);
   return {
     id: null,
     etablissement: State.etablissement, // 'smoke' | 'moule'
@@ -240,8 +266,8 @@ function nouveauPetiteCaisseDraft() {
    ================================================================ */
 function calculTotalDraft(draft) {
   let total = 0;
-  BILLETS.forEach(b => total += (draft.denomQte['b'+b] || 0) * b);
-  PIECES.forEach(p => total += (draft.denomQte['p'+p] || 0) * p);
+  BILLETS_TOUS.forEach(b => total += (draft.denomQte['b'+b] || 0) * b);
+  PIECES_TOUTES.forEach(p => total += (draft.denomQte['p'+p] || 0) * p);
   return Math.round(total * 100) / 100;
 }
 
@@ -1182,9 +1208,9 @@ function renderEcranNouveau() {
         <span>Billets</span>
       </div>
       <div class="denom-section-label">Billets</div>
-      ${BILLETS.map(b => renderDenomRow(b, 'b', false)).join('')}
+      ${getBillets().map(b => renderDenomRow(b, 'b', false)).join('')}
       <div class="denom-section-label">Pièces</div>
-      ${PIECES.map(p => renderDenomRow(p, 'p', true)).join('')}
+      ${getPieces().map(p => renderDenomRow(p, 'p', true)).join('')}
     </div>
 
     <div class="total-banner">
@@ -1962,11 +1988,11 @@ function renderDetailModal() {
   const denomQte = c.denomQte || {};
   const statut = statutEcart(c.ecart, State.seuilEcartAlerte);
 
-  const lignesBillets = BILLETS.filter(b => (denomQte['b'+b]||0) > 0).map(b => {
+  const lignesBillets = BILLETS_TOUS.filter(b => (denomQte['b'+b]||0) > 0).map(b => {
     const q = denomQte['b'+b];
     return `<div class="denom-row" style="padding:5px 0;"><div class="denom-label">${b} €</div><div style="flex:1;color:var(--ink-soft);">${q} ×</div><div class="denom-total">${formatMontant(q*b)}</div></div>`;
   }).join('');
-  const lignesPieces = PIECES.filter(p => (denomQte['p'+p]||0) > 0).map(p => {
+  const lignesPieces = PIECES_TOUTES.filter(p => (denomQte['p'+p]||0) > 0).map(p => {
     const q = denomQte['p'+p];
     const lbl = p >= 1 ? p + ' €' : (p*100).toFixed(0) + ' cts';
     return `<div class="denom-row" style="padding:5px 0;"><div class="denom-label">${lbl}</div><div style="flex:1;color:var(--ink-soft);">${q} ×</div><div class="denom-total">${formatMontant(q*p)}</div></div>`;
@@ -2677,9 +2703,9 @@ const Export = {
         <td style="text-align:right;">${formatMontant(montant)}</td>
       </tr>`;
 
-    const lignesBillets = BILLETS.filter(b => (denomQte['b'+b]||0) > 0)
+    const lignesBillets = BILLETS_TOUS.filter(b => (denomQte['b'+b]||0) > 0)
       .map(b => ligneDenom(b + ' €', denomQte['b'+b], denomQte['b'+b]*b)).join('');
-    const lignesPieces = PIECES.filter(p => (denomQte['p'+p]||0) > 0)
+    const lignesPieces = PIECES_TOUTES.filter(p => (denomQte['p'+p]||0) > 0)
       .map(p => ligneDenom(p >= 1 ? p+' €' : (p*100).toFixed(0)+' cts', denomQte['p'+p], denomQte['p'+p]*p)).join('');
 
     const ecartHtml = (c.ecart !== null && c.ecart !== undefined) ? `
