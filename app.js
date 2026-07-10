@@ -40,7 +40,7 @@ const EMPLOYES_DOC = "config/employes";
 /* ================================================================
    SECTION 2 — DÉNOMINATIONS (billets / pièces EUR)
    ================================================================ */
-const BILLETS = [500, 200, 100, 50, 20, 10, 5];
+const BILLETS = [100, 50, 20, 10, 5];
 
 // Définition des deux établissements : identité visuelle, nom, clé.
 // Chaque employé est rattaché à l'un d'eux ; toutes les données sont
@@ -124,7 +124,7 @@ function appliquerTheme(etablissementCle) {
 }
 
 
-const PIECES  = [2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01];
+const PIECES  = [2, 1, 0.5, 0.2, 0.1, 0.05];
 
 // Liste centrale des modes de paiement gérés par l'app. Toute la logique
 // (saisie tickets, rapprochement, écarts, exports) s'appuie sur cette liste
