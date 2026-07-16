@@ -333,8 +333,23 @@ function caisseADejaOuvertureActive(caisse, idAExclure) {
     .filter(c => normaliserNomCaisse(c.caisse) === cibleNormalisee && c.id !== idAExclure)
     .sort((a,b) => (a.createdAt||0) - (b.createdAt||0));
   if (comptagesCaisse.length === 0) return null;
-  const dernier = comptagesCaisse[comptagesCaisse.length - 1];
-  return dernier.type === 'fond' ? dernier : null;
+
+  // Logique robuste par appariement : on parcourt les comptages dans l'ordre
+  // chronologique et on maintient un état "ouverture en cours". Si on rencontre
+  // une ouverture, elle devient l'ouverture active. Si on rencontre une clôture
+  // APRÈS l'ouverture active, on ferme le cycle. À la fin, si une ouverture
+  // reste non-clôturée, c'est elle qui est "active".
+  // Cette approche résiste aux saisies dans le désordre (ex: clôture créée
+  // AVANT l'ouverture dans Firestore à cause d'un délai réseau ou d'une erreur).
+  let ouvertureEnCours = null;
+  for (const c of comptagesCaisse) {
+    if (c.type === 'fond') {
+      ouvertureEnCours = c;
+    } else if (c.type === 'cloture' && ouvertureEnCours) {
+      ouvertureEnCours = null; // cycle fermé
+    }
+  }
+  return ouvertureEnCours;
 }
 
 // Récupère les tickets d'une caisse strictement compris entre l'horodatage
