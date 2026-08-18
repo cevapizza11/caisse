@@ -220,6 +220,7 @@ const State = {
 
 const SESSION_KEY = 'caisseMarmiteEmployeActif';
 const QUEUE_KEY = 'caisseMarmiteFileTicketsEnAttente';
+const DRAFT_KEY = 'caisseMarmiteDraftEnCours'; // sauvegarde du comptage en cours de saisie
 
 function nouveauDraft() {
   const denomQte = {};
@@ -246,6 +247,42 @@ function nouveauDraft() {
     forcerCloture: false,   // permet à un admin de contourner le blocage de clôture sans ouverture
     createdAt: null
   };
+}
+
+// Sauvegarde le draft en cours dans localStorage pour qu'il survive à une
+// navigation vers un autre écran (tickets, historique...) et soit restauré
+// automatiquement au retour sur l'écran Nouveau.
+function sauvegarderDraftLocal() {
+  if (!State.draft) return;
+  try {
+    localStorage.setItem(DRAFT_KEY, JSON.stringify(State.draft));
+  } catch(e) { /* localStorage plein ou indisponible */ }
+}
+
+// Restaure le draft depuis localStorage si il existe et correspond à
+// l'établissement actif. Retourne true si un draft a été restauré.
+function restaurerDraftLocal() {
+  try {
+    const brut = localStorage.getItem(DRAFT_KEY);
+    if (!brut) return false;
+    const draft = JSON.parse(brut);
+    // On ne restaure que si c'est le même établissement (évite de
+    // mélanger les données Smoke/Moule en cas de changement de compte)
+    if (draft.etablissement && draft.etablissement !== State.etablissement) return false;
+    // On ne restaure pas un draft d'édition (id rempli) — il est trop
+    // risqué de ré-éditer un document déjà enregistré depuis un cache local.
+    if (draft.id) { effacerDraftLocal(); return false; }
+    State.draft = draft;
+    return true;
+  } catch(e) {
+    effacerDraftLocal();
+    return false;
+  }
+}
+
+// Efface le draft sauvegardé (après enregistrement réussi ou déconnexion).
+function effacerDraftLocal() {
+  try { localStorage.removeItem(DRAFT_KEY); } catch(e) {}
 }
 
 function nouveauPetiteCaisseDraft() {
@@ -453,7 +490,12 @@ const Nav = {
       return;
     }
     if (screen === 'nouveau' && State.currentScreen !== 'nouveau') {
-      State.draft = nouveauDraft();
+      // Tente de restaurer le draft en cours depuis localStorage — si l'employé
+      // était parti vérifier un ticket et revient, il retrouve sa saisie intacte.
+      // Sinon on repart sur un draft vierge.
+      if (!restaurerDraftLocal()) {
+        State.draft = nouveauDraft();
+      }
     }
     if (screen === 'tickets') {
       if (!State.ticketContexte) {
@@ -598,6 +640,7 @@ const Auth = {
       localStorage.removeItem(SESSION_KEY);
       localStorage.removeItem('caisseMarmiteEtablissement');
     } catch(e) {}
+    effacerDraftLocal(); // efface le brouillon en cours à la déconnexion
     Minuteur.stopper(); // stoppe le minuteur à la déconnexion manuelle
     this.employeChoisi = null;
     Nav.updateActiveTab(State.currentScreen);
@@ -1303,6 +1346,7 @@ const Draft = {
       State.draft[field] = value;
       if (field === 'caisse') { State.draft.forcerOuverture = false; State.draft.forcerCloture = false; }
     }
+    sauvegarderDraftLocal();
     Render.screen();
   },
 
@@ -1310,11 +1354,13 @@ const Draft = {
     State.draft.type = type;
     State.draft.forcerOuverture = false; // on réinitialise le forçage à chaque changement de type
     State.draft.forcerCloture = false;
+    sauvegarderDraftLocal();
     Render.screen();
   },
 
   toggleForcerCloture() {
     State.draft.forcerCloture = !State.draft.forcerCloture;
+    sauvegarderDraftLocal();
     Render.screen();
   },
 
@@ -1327,12 +1373,14 @@ const Draft = {
     let v = parseInt(value, 10);
     if (isNaN(v) || v < 0) v = 0;
     State.draft.denomQte[key] = v;
+    sauvegarderDraftLocal();
     Render.screen();
   },
 
   stepDenom(key, delta) {
     const cur = State.draft.denomQte[key] || 0;
     State.draft.denomQte[key] = Math.max(0, cur + delta);
+    sauvegarderDraftLocal();
     Render.screen();
   },
 
@@ -1419,6 +1467,7 @@ const Draft = {
       toast(d.id ? "Comptage modifié" : "Comptage enregistré ✓");
       await Sync.chargerComptages();
       State.dernierComptageId = idComptage;
+      effacerDraftLocal(); // le comptage est enregistré, on efface le brouillon local
       State.draft = nouveauDraft();
       // Les non-admins n'ont pas accès à l'Historique : on les laisse sur
       // l'écran de saisie (qui propose désormais un bouton d'impression
@@ -2963,6 +3012,7 @@ const Minuteur = {
     const nom = State.employeActif.nom;
     State.employeActif = null;
     localStorage.removeItem(SESSION_KEY);
+    effacerDraftLocal(); // efface le brouillon à la déconnexion automatique
     this._timer = null;
     toast(nom + " — déconnecté automatiquement après inactivité");
     Nav.updateActiveTab('nouveau');
