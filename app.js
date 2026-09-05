@@ -481,6 +481,17 @@ function estAdmin() {
   return !!(emp && emp.admin);
 }
 
+// Super-administrateur : seul rôle autorisé à gérer la liste des employés
+// (ajouter, modifier, supprimer, changer les PINs, changer les rôles).
+// Un admin normal a accès à tout le reste (historique, stats, réglages)
+// mais ne peut pas toucher aux comptes des autres employés.
+function estSuperAdmin() {
+  if (State.employes.length === 0) return true;
+  if (!State.employeActif) return false;
+  const emp = State.employes.find(e => e.nom === State.employeActif.nom);
+  return !!(emp && emp.superAdmin);
+}
+
 const ECRANS_RESERVES_ADMIN = ['reglages', 'historique', 'stats'];
 
 const Nav = {
@@ -1078,6 +1089,16 @@ const Sync = {
       State.employes[0].admin = true;
       Sync.sauvegarderEmployes();
       console.warn("Aucun admin trouvé — " + State.employes[0].nom + " promu administrateur automatiquement.");
+    }
+    // Migration : si aucun super-admin n'existe encore (données créées avant
+    // l'ajout de ce rôle), le premier admin devient super-admin automatiquement.
+    if (State.employes.length > 0 && !State.employes.some(e => e.superAdmin === true)) {
+      const premierAdmin = State.employes.find(e => e.admin === true);
+      if (premierAdmin) {
+        premierAdmin.superAdmin = true;
+        Sync.sauvegarderEmployes();
+        console.warn("Aucun super-admin trouvé — " + premierAdmin.nom + " promu super-administrateur automatiquement.");
+      }
     }
   },
 
@@ -2346,13 +2367,22 @@ function renderListeEmployes() {
   if (State.employes.length === 0) {
     return `<div class="helper-text" style="margin-bottom:10px;">Aucun employé configuré — l'app sera accessible sans code.</div>`;
   }
+  const isSuperAdmin = estSuperAdmin();
   return State.employes.map((e, i) => `
     <div style="padding:8px 0; border-bottom:1px solid var(--border);">
       <div class="denom-row" style="padding:0 0 6px;">
-        <input type="text" value="${e.nom}" placeholder="Nom" style="margin-bottom:0; flex:2;" onchange="Reglages.modifierEmploye(${i}, 'nom', this.value)">
-        <input type="text" inputmode="numeric" maxlength="4" value="${e.pin}" placeholder="PIN" style="margin-bottom:0; flex:1; text-align:center;" onchange="Reglages.modifierEmploye(${i}, 'pin', this.value)">
-        <button class="btn-icon admin-toggle ${e.admin ? 'active' : ''}" title="${e.admin ? 'Administrateur' : 'Donner les droits administrateur'}" onclick="Reglages.toggleAdmin(${i})">${e.admin ? '👑' : '🔒'}</button>
-        <button class="btn-icon" style="background:var(--ivoire-dark); color:var(--ecart-bad); margin-left:4px;" onclick="Reglages.supprimerEmploye(${i})">✕</button>
+        <input type="text" value="${e.nom}" placeholder="Nom" style="margin-bottom:0; flex:2;"
+          ${isSuperAdmin ? `onchange="Reglages.modifierEmploye(${i}, 'nom', this.value)"` : 'readonly style="margin-bottom:0; flex:2; background:#fafaf7;"'}>
+        <input type="text" inputmode="numeric" maxlength="4" value="${isSuperAdmin ? e.pin : '••••'}" placeholder="PIN"
+          style="margin-bottom:0; flex:1; text-align:center;"
+          ${isSuperAdmin ? `onchange="Reglages.modifierEmploye(${i}, 'pin', this.value)"` : 'readonly style="background:#fafaf7;"'}>
+        ${isSuperAdmin ? `
+          <button class="btn-icon admin-toggle ${e.admin ? 'active' : ''}" title="${e.admin ? 'Administrateur' : 'Donner les droits administrateur'}" onclick="Reglages.toggleAdmin(${i})">${e.superAdmin ? '⭐' : e.admin ? '👑' : '🔒'}</button>
+          <button class="btn-icon ${e.superAdmin ? 'active' : ''}" title="${e.superAdmin ? 'Super-admin — retirer' : 'Donner les droits super-admin'}" style="margin-left:4px;" onclick="Reglages.toggleSuperAdmin(${i})">⭐</button>
+          <button class="btn-icon" style="background:var(--ivoire-dark); color:var(--ecart-bad); margin-left:4px;" onclick="Reglages.supprimerEmploye(${i})">✕</button>
+        ` : `
+          <span style="padding:0 8px; font-size:18px;">${e.superAdmin ? '⭐' : e.admin ? '👑' : '🔒'}</span>
+        `}
       </div>
       <div class="denom-row" style="padding:0;">
         <span class="helper-text" style="margin-bottom:0; flex:1;">Établissement :</span>
@@ -2376,7 +2406,7 @@ function renderEcranReglages() {
     <div class="card">
       <div class="card-title">Employés &amp; codes PIN</div>
       ${renderListeEmployes()}
-      <button class="btn btn-secondary" style="margin-top:8px;" onclick="Reglages.ajouterEmploye()">➕ Ajouter un employé</button>
+      ${estSuperAdmin() ? `<button class="btn btn-secondary" style="margin-top:8px;" onclick="Reglages.ajouterEmploye()">➕ Ajouter un employé</button>` : `<div class="helper-text" style="margin-top:8px;">⭐ Seul le super-administrateur peut ajouter ou supprimer des employés et modifier les PINs.</div>`}
       <div class="helper-text" style="margin-top:8px; margin-bottom:0;">Le code PIN doit faire 4 chiffres. Chaque comptage enregistré est associé à l'employé connecté.</div>
     </div>
 
@@ -2470,6 +2500,7 @@ const Reglages = {
   },
 
   ajouterEmploye() {
+    if (!estSuperAdmin()) { toast("Seul le super-administrateur peut gérer les employés", true); return; }
     const nom = prompt("Prénom de l'employé :");
     if (!nom || !nom.trim()) return;
     if (State.employes.find(e => e.nom.toLowerCase() === nom.trim().toLowerCase())) {
@@ -2481,8 +2512,6 @@ const Reglages = {
       toast("Le PIN doit être composé de 4 chiffres", true);
       return;
     }
-    // Devient automatiquement administrateur s'il n'existe encore aucun admin
-    // (plus robuste que de tester juste "premier employé créé")
     const aucunAdmin = !State.employes.some(e => e.admin === true);
     State.employes.push({ nom: nom.trim(), pin: pin, admin: aucunAdmin });
     Render.screen();
@@ -2491,6 +2520,13 @@ const Reglages = {
   },
 
   modifierEmploye(index, champ, value) {
+    // L'établissement peut être modifié par n'importe quel admin.
+    // Les autres champs sensibles (nom, PIN, rôle) sont réservés au super-admin.
+    if (champ !== 'etablissement' && !estSuperAdmin()) {
+      toast("Seul le super-administrateur peut modifier les noms et PINs", true);
+      Render.screen();
+      return;
+    }
     if (champ === 'nom') {
       if (!value.trim()) { toast("Le nom ne peut pas être vide", true); Render.screen(); return; }
       State.employes[index].nom = value.trim();
@@ -2509,6 +2545,7 @@ const Reglages = {
   },
 
   supprimerEmploye(index) {
+    if (!estSuperAdmin()) { toast("Seul le super-administrateur peut supprimer des employés", true); return; }
     const emp = State.employes[index];
     if (emp.admin && State.employes.filter(e => e.admin).length <= 1) {
       toast("Impossible : il doit rester au moins un administrateur", true);
@@ -2521,6 +2558,7 @@ const Reglages = {
   },
 
   toggleAdmin(index) {
+    if (!estSuperAdmin()) { toast("Seul le super-administrateur peut changer les rôles", true); return; }
     const emp = State.employes[index];
     if (emp.admin && State.employes.filter(e => e.admin).length <= 1) {
       toast("Il doit rester au moins un administrateur", true);
@@ -2530,6 +2568,22 @@ const Reglages = {
     Render.screen();
     Sync.sauvegarderEmployes();
     toast(emp.admin ? emp.nom + " est maintenant administrateur" : emp.nom + " n'est plus administrateur");
+  },
+
+  toggleSuperAdmin(index) {
+    if (!estSuperAdmin()) { toast("Seul le super-administrateur peut gérer ce rôle", true); return; }
+    const emp = State.employes[index];
+    // On ne peut pas se retirer son propre statut super-admin si on est le seul
+    const nbSuperAdmins = State.employes.filter(e => e.superAdmin).length;
+    if (emp.superAdmin && nbSuperAdmins <= 1) {
+      toast("Impossible : il doit rester au moins un super-administrateur", true);
+      return;
+    }
+    emp.superAdmin = !emp.superAdmin;
+    if (emp.superAdmin) emp.admin = true; // un super-admin est forcément aussi admin
+    Render.screen();
+    Sync.sauvegarderEmployes();
+    toast(emp.superAdmin ? emp.nom + " est maintenant super-administrateur ⭐" : emp.nom + " n'est plus super-administrateur");
   }
 };
 
