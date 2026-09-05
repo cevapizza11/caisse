@@ -2406,7 +2406,8 @@ function renderEcranReglages() {
     <div class="card">
       <div class="card-title">Employés &amp; codes PIN</div>
       ${renderListeEmployes()}
-      ${estSuperAdmin() ? `<button class="btn btn-secondary" style="margin-top:8px;" onclick="Reglages.ajouterEmploye()">➕ Ajouter un employé</button>` : `<div class="helper-text" style="margin-top:8px;">⭐ Seul le super-administrateur peut ajouter ou supprimer des employés et modifier les PINs.</div>`}
+      ${estAdmin() ? `<button class="btn btn-secondary" style="margin-top:8px;" onclick="Reglages.ajouterEmploye()">➕ Ajouter un employé</button>` : ''}
+      ${estAdmin() && !estSuperAdmin() ? `<div class="helper-text" style="margin-top:8px;">⭐ Seul le super-administrateur peut supprimer des employés et modifier les PINs existants.</div>` : ''}
       <div class="helper-text" style="margin-top:8px; margin-bottom:0;">Le code PIN doit faire 4 chiffres. Chaque comptage enregistré est associé à l'employé connecté.</div>
     </div>
 
@@ -2500,7 +2501,7 @@ const Reglages = {
   },
 
   ajouterEmploye() {
-    if (!estSuperAdmin()) { toast("Seul le super-administrateur peut gérer les employés", true); return; }
+    if (!estAdmin()) { toast("Seul un administrateur peut ajouter des employés", true); return; }
     const nom = prompt("Prénom de l'employé :");
     if (!nom || !nom.trim()) return;
     if (State.employes.find(e => e.nom.toLowerCase() === nom.trim().toLowerCase())) {
@@ -2513,10 +2514,10 @@ const Reglages = {
       return;
     }
     const aucunAdmin = !State.employes.some(e => e.admin === true);
-    State.employes.push({ nom: nom.trim(), pin: pin, admin: aucunAdmin });
+    State.employes.push({ nom: nom.trim(), pin: pin, admin: aucunAdmin, etablissement: State.etablissement });
     Render.screen();
     Sync.sauvegarderEmployes();
-    toast(aucunAdmin ? nom.trim() + " ajouté (administrateur par défaut)" : nom.trim() + " ajouté et enregistré");
+    toast(aucunAdmin ? nom.trim() + " ajouté (administrateur par défaut)" : nom.trim() + " ajouté");
   },
 
   modifierEmploye(index, champ, value) {
