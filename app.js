@@ -31,7 +31,7 @@ try {
   firebaseReady = false;
 }
 
-const BUILD_VERSION = "v.17/10/2026 10:15";
+const BUILD_VERSION = "v.17/10/2026 10:50";
 
 /* ================================================================
    SECTION 1B — LIAISON AVEC L'APPLI DE COMMANDE MOULE & SMILE (17/10/2026)
@@ -63,7 +63,7 @@ const LiaisonAppli = {
   app: null, auth: null, dbMoule: null, user: null, unsub: null,
   statut: 'inactif',   // 'inactif' (Smoke) | 'deconnecte' | 'demarrage' | 'ecoute' | 'erreur'
   erreur: '',
-  idsConnus: new Set(), // tickets appli déjà copiés (évite toute réécriture inutile)
+  connus: new Map(),   // tickets appli déjà copiés : id → {mode, montant, caisse} (évite toute réécriture inutile)
   premierSnapshot: true,
   dernierImport: null,
 
@@ -116,7 +116,11 @@ const LiaisonAppli = {
     // Liste des tickets appli déjà présents dans le comptage (pour ne rien réécrire)
     try {
       const snapConnus = await db.collection(TICKETS_COLLECTION).where('createdAt', '>=', depuisMs).get();
-      snapConnus.forEach(d => { if (d.id.startsWith('appli_')) this.idsConnus.add(d.id); });
+      snapConnus.forEach(d => {
+        if (!d.id.startsWith('appli_')) return;
+        const t = d.data();
+        this.connus.set(d.id, { mode: t.mode, montant: t.montant, caisse: t.caisse });
+      });
     } catch (e) { console.warn("Liaison appli — lecture des tickets déjà copiés impossible :", e); }
     if (this.unsub || !this.user) return;
     this.unsub = this.dbMoule.collection('historique')
@@ -142,46 +146,67 @@ const LiaisonAppli = {
     this.erreur = '';
     if (nb > 0) {
       this.dernierImport = Date.now();
-      if (!this.premierSnapshot) toast("📲 " + nb + " ticket" + (nb > 1 ? "s" : "") + " reçu" + (nb > 1 ? "s" : "") + " de l'appli de commande");
+      if (!this.premierSnapshot) toast("📲 " + nb + " ticket" + (nb > 1 ? "s" : "") + " reçu" + (nb > 1 ? "s" : "") + " ou corrigé" + (nb > 1 ? "s" : "") + " depuis l'appli de commande");
     }
     this.premierSnapshot = false;
     rafraichirEcranSiPossible();
   },
 
-  // Copie un encaissement de l'appli en ticket(s) — un ticket par moyen de paiement.
+  // Copie un encaissement de l'appli en ticket(s) — un ticket par moyen de paiement —
+  // et suit les corrections : si le moyen de paiement est corrigé dans l'appli de
+  // commande (Historique → ✏️ Modifier le paiement), les tickets copiés sont mis à jour,
+  // et ceux devenus inutiles (ex. mixte → simple) sont supprimés.
   // Ignorés : repas employés (offerts), commandes archivées sans paiement, anciens
   // encaissements faits avant la mise à jour (aucun mode de paiement enregistré).
   importer(idHisto, h) {
-    if (!h || !Array.isArray(h.paiements) || h.paiements.length === 0) return 0;
-    if (h.type === 'employe' || h.modePaiement === 'offert') return 0;
-    const ms = h.encaisseLeMs || (h.timestamp && h.timestamp.toMillis ? h.timestamp.toMillis() : null);
+    const prefixe = 'appli_' + idHisto + '_';
+    let voulus = [];
+    if (h && Array.isArray(h.paiements) && h.type !== 'employe' && h.modePaiement !== 'offert') {
+      voulus = h.paiements
+        .map(p => ({ mode: p.mode, montant: Math.round((parseFloat(p.montant) || 0) * 100) / 100 }))
+        .filter(p => p.montant > 0 && TOUS_MODES_PAIEMENT.find(m => m.cle === p.mode));
+    }
+    const ms = h && (h.encaisseLeMs || (h.timestamp && h.timestamp.toMillis ? h.timestamp.toMillis() : null));
     if (!ms) return 0;
     let nb = 0;
-    h.paiements.forEach((p, i) => {
-      const montant = Math.round((parseFloat(p.montant) || 0) * 100) / 100;
-      if (montant <= 0 || !TOUS_MODES_PAIEMENT.find(m => m.cle === p.mode)) return;
-      const idTicket = 'appli_' + idHisto + '_' + i;
-      if (this.idsConnus.has(idTicket) || State.tickets.some(t => t.id === idTicket)) return;
+    voulus.forEach((p, i) => {
+      const idTicket = prefixe + i;
+      const local = State.tickets.find(t => t.id === idTicket);
+      const connu = this.connus.get(idTicket) || (local ? { mode: local.mode, montant: local.montant, caisse: local.caisse } : null);
+      if (connu && connu.mode === p.mode && Math.abs((connu.montant || 0) - p.montant) < 0.005) return; // déjà à jour
       const d = new Date(ms);
       const payload = {
         date: d.toISOString().slice(0, 10),
         heure: d.toTimeString().slice(0, 5),
-        caisse: State.caisseTicketsAppli || State.caisses[0] || "Caisse 1",
+        caisse: (connu && connu.caisse) || State.caisseTicketsAppli || State.caisses[0] || "Caisse 1",
         service: SERVICE_APPLI,
         mode: p.mode,
-        montant: montant,
+        montant: p.montant,
         employe: "Appli · " + (h.table != null ? "Table " + h.table : "?"),
         etablissement: 'moule',
         source: 'appli',
         table: h.table != null ? h.table : null,
         historiqueId: idHisto,
-        mixte: h.paiements.length > 1,
+        mixte: voulus.length > 1,
+        corrige: !!connu || !!h.paiementCorrigeLeMs,
         createdAt: ms
       };
-      this.idsConnus.add(idTicket);
+      this.connus.set(idTicket, { mode: payload.mode, montant: payload.montant, caisse: payload.caisse });
+      State.tickets = State.tickets.filter(t => t.id !== idTicket);
       State.tickets.unshift({ id: idTicket, ...payload });
       db.collection(TICKETS_COLLECTION).doc(idTicket).set(payload)
         .catch(e => console.error("Liaison appli — copie du ticket impossible :", e));
+      nb++;
+    });
+    // Tickets en trop après une correction (ex. paiement mixte devenu simple)
+    const idsEnTrop = new Set();
+    this.connus.forEach((v, id) => { if (id.startsWith(prefixe) && parseInt(id.slice(prefixe.length), 10) >= voulus.length) idsEnTrop.add(id); });
+    State.tickets.forEach(t => { if (t.id.startsWith(prefixe) && parseInt(t.id.slice(prefixe.length), 10) >= voulus.length) idsEnTrop.add(t.id); });
+    idsEnTrop.forEach(id => {
+      this.connus.delete(id);
+      State.tickets = State.tickets.filter(t => t.id !== id);
+      db.collection(TICKETS_COLLECTION).doc(id).delete()
+        .catch(e => console.error("Liaison appli — suppression du ticket en trop impossible :", e));
       nb++;
     });
     return nb;
@@ -446,6 +471,7 @@ function nouveauDraft() {
     caTheoriqueTR: null,   // relevé titre-restaurant (bordereau de remise)
     caTheoriqueCV: null,   // relevé chèque-vacances
     caTheoriqueCQ: null,   // relevé chèque "classique"
+    zHiboutik: {},         // totaux du Z Hiboutik par moyen de paiement (Moule & Smile)
     fondDeCaisse: 0,       // montant de départ en caisse, pour calcul écart sur clôture
     commentaire: "",
     forcerOuverture: false, // permet à un admin de contourner le blocage d'ouverture en doublon
@@ -530,6 +556,30 @@ function calculEcartMode(draft, modeCle) {
   const totalTickets = totauxPourDraft(draft)[modeCle] || 0;
   return Math.round((parseFloat(valeurRelevee) - totalTickets) * 100) / 100;
 }
+/* ---------------- Z HIBOUTIK (contrôle croisé, Moule & Smile) — 17/10/2026 ----------------
+   À la clôture, on recopie les totaux par moyen de paiement du Z de caisse Hiboutik.
+   L'app compare : Z Hiboutik − tickets du cycle (appli de commande + saisies manuelles).
+   Un écart veut dire qu'un encaissement n'a pas été cliqué pareil dans les deux caisses
+   (mauvais moyen de paiement, vente oubliée ou restée ouverte dans Hiboutik...). */
+function zHiboutikRenseigne(draft) {
+  const z = draft && draft.zHiboutik;
+  return !!z && Object.values(z).some(v => v !== null && v !== undefined && v !== '');
+}
+function calculEcartsHiboutik(draft) {
+  if (!zHiboutikRenseigne(draft)) return null;
+  const tickets = totauxPourDraft(draft);
+  const parMode = {};
+  let totalZ = 0;
+  MODES_PAIEMENT.forEach(m => {
+    const brut = draft.zHiboutik[m.cle];
+    const z = (brut === null || brut === undefined || brut === '') ? 0 : (parseFloat(String(brut).replace(',', '.')) || 0);
+    totalZ += z;
+    parMode[m.cle] = { z: Math.round(z * 100) / 100, tickets: tickets[m.cle] || 0, ecart: Math.round((z - (tickets[m.cle] || 0)) * 100) / 100 };
+  });
+  totalZ = Math.round(totalZ * 100) / 100;
+  return { parMode, totalZ, totalTickets: tickets.total, ecartTotal: Math.round((totalZ - tickets.total) * 100) / 100 };
+}
+
 // Alias conservé pour compatibilité avec le code existant
 function calculEcartCB(draft) {
   return calculEcartMode(draft, 'cb');
@@ -1099,6 +1149,7 @@ const Sync = {
       const ecartTR = calculEcartMode(draft, 'titrerestaurant');
       const ecartCV = calculEcartMode(draft, 'chequevacances');
       const ecartCQ = calculEcartMode(draft, 'cheque');
+      const ecHib = calculEcartsHiboutik(draft);
       const payload = {
         date: draft.date,
         heure: draft.heure,
@@ -1121,6 +1172,10 @@ const Sync = {
         ecartTR: ecartTR,
         ecartCV: ecartCV,
         ecartCQ: ecartCQ,
+        zHiboutik: ecHib ? Object.fromEntries(Object.entries(ecHib.parMode).map(([k, v]) => [k, v.z])) : null,
+        ecartsHiboutik: ecHib ? Object.fromEntries(Object.entries(ecHib.parMode).map(([k, v]) => [k, v.ecart])) : null,
+        totalZHiboutik: ecHib ? ecHib.totalZ : null,
+        ecartHiboutikTotal: ecHib ? ecHib.ecartTotal : null,
         createdAt: draft.createdAt || Date.now()
       };
       let idComptage = draft.id;
@@ -1580,6 +1635,8 @@ function renderEcranNouveau() {
     </div>`;
     }).join('')}
 
+    ${d.type === 'cloture' && State.etablissement === 'moule' ? renderCarteZHiboutik(d) : ''}
+
     <div class="card">
       <label>Commentaire (optionnel)</label>
       <textarea placeholder="Ex : billet déchiré mis de côté, erreur de rendu monnaie..." onchange="Draft.setField('commentaire', this.value)">${d.commentaire || ''}</textarea>
@@ -1594,10 +1651,48 @@ function renderEcranNouveau() {
   `;
 }
 
+function renderCarteZHiboutik(d) {
+  const z = d.zHiboutik || {};
+  const ec = calculEcartsHiboutik(d);
+  const lignes = MODES_PAIEMENT.map(m => {
+    const val = (z[m.cle] === null || z[m.cle] === undefined) ? '' : z[m.cle];
+    const e = ec ? ec.parMode[m.cle] : null;
+    const st = e ? statutEcart(e.ecart, State.seuilEcartAlerte) : null;
+    return `
+      <div class="denom-row" style="padding:4px 0;">
+        <div style="flex:1.4; font-weight:600; font-size:14px;">${m.icone} ${m.label}</div>
+        <div style="flex:1;"><input type="number" inputmode="decimal" step="0.01" style="margin-bottom:0;" value="${val}" placeholder="Z" onchange="Draft.setZ('${m.cle}', this.value)"></div>
+        <div style="width:92px; text-align:right; font-size:12px; color:var(--ink-soft);">tickets<br><strong style="color:var(--ink);">${formatMontant(e ? e.tickets : (totauxPourDraft(d)[m.cle] || 0))}</strong></div>
+        <div style="width:78px; text-align:right;">${e ? `<span class="hist-badge ${st}">${formatMontantSigne(e.ecart)}</span>` : ''}</div>
+      </div>`;
+  }).join('');
+  const stTot = ec ? statutEcart(ec.ecartTotal, State.seuilEcartAlerte) : null;
+  return `
+    <div class="card">
+      <div class="card-title">🧾 Contrôle Z Hiboutik</div>
+      <div class="helper-text" style="margin-top:-6px; line-height:1.5;">Recopie les totaux par moyen de paiement du Z de caisse Hiboutik. L'app les compare aux tickets de ce cycle de caisse (appli de commande + saisies manuelles). Laisse vide si tu ne fais pas le contrôle. Écart ≤ 0,50 € = juste, au-delà de ${formatMontant(State.seuilEcartAlerte)} = écart important (seuil réglable dans Réglages).</div>
+      ${lignes}
+    </div>
+    ${ec ? `
+    <div class="ecart-box ${stTot}">
+      <span class="lbl" style="line-height:1.4;">${stTot === 'ok' ? '✓ Hiboutik et appli concordent' : '⚠ Écart Hiboutik / appli'}<br><span style="font-weight:600; text-transform:none; letter-spacing:0;">Z ${formatMontant(ec.totalZ)} · tickets ${formatMontant(ec.totalTickets)}</span></span>
+      <span class="val">${formatMontantSigne(ec.ecartTotal)}</span>
+    </div>
+    ${stTot !== 'ok' ? `<div class="helper-text" style="margin-top:-8px; margin-bottom:14px;">Écart positif : plus encaissé dans Hiboutik que dans l'appli (vente faite directement dans Hiboutik ?). Négatif : vente de l'appli absente ou restée ouverte dans Hiboutik. Écart sur deux moyens qui s'annule : mauvais moyen de paiement cliqué dans l'une des deux caisses.</div>` : ''}
+    ` : ''}`;
+}
+
 /* ================================================================
    SECTION 9 — MODULE DRAFT (interactions écran de saisie)
    ================================================================ */
 const Draft = {
+  setZ(mode, value) {
+    if (!State.draft.zHiboutik) State.draft.zHiboutik = {};
+    State.draft.zHiboutik[mode] = value === '' ? '' : value;
+    sauvegarderDraftLocal();
+    Render.screen();
+  },
+
   setField(field, value) {
     if (field === 'caTheorique') {
       State.draft.caTheorique = value === '' ? null : parseFloat(value);
@@ -1802,7 +1897,7 @@ function renderEcranTickets() {
       <div class="hist-item" style="cursor:default; ${t._enAttente ? 'border-color:var(--ecart-warn); border-style:dashed;' : ''}">
         <div class="hist-main">
           <div class="hist-titre">${info.icone} ${info.label}</div>
-          <div class="hist-meta">${t.heure || ''}${t.employe ? ' · ' + t.employe : ''}${t.mixte ? ' · paiement mixte' : ''}</div>
+          <div class="hist-meta">${t.heure || ''}${t.employe ? ' · ' + t.employe : ''}${t.mixte ? ' · paiement mixte' : ''}${t.corrige ? ' · ✏️ corrigé dans l\'appli' : ''}</div>
         </div>
         <div class="hist-right" style="display:flex; align-items:center; gap:10px;">
           <div>
@@ -2318,6 +2413,7 @@ const Hist = {
       caTheoriqueTR: c.caTheoriqueTR,
       caTheoriqueCV: c.caTheoriqueCV,
       caTheoriqueCQ: c.caTheoriqueCQ,
+      zHiboutik: c.zHiboutik ? { ...c.zHiboutik } : {},
       fondDeCaisse: c.fondDeCaisse || 0,
       commentaire: c.commentaire || "",
       forcerOuverture: false,
@@ -2385,6 +2481,12 @@ function renderDetailModal() {
         <span class="val">${formatMontantSigne(ec)}</span>
       </div>`;
       }).join('')}
+
+      ${c.ecartHiboutikTotal !== null && c.ecartHiboutikTotal !== undefined ? `
+      <div class="ecart-box ${statutEcart(c.ecartHiboutikTotal, State.seuilEcartAlerte)}" style="margin-top:8px;">
+        <span class="lbl">Écart Z Hiboutik / appli (Z ${formatMontant(c.totalZHiboutik || 0)})${c.ecartsHiboutik ? '<br><span style="font-weight:600; text-transform:none; letter-spacing:0;">' + MODES_PAIEMENT.filter(m => Math.abs(c.ecartsHiboutik[m.cle] || 0) >= 0.01).map(m => m.label + ' ' + formatMontantSigne(c.ecartsHiboutik[m.cle])).join(' · ') + '</span>' : ''}</span>
+        <span class="val">${formatMontantSigne(c.ecartHiboutikTotal)}</span>
+      </div>` : ''}
 
       ${c.commentaire ? `<div class="card" style="margin-top:14px;"><label>Commentaire</label><div>${c.commentaire}</div></div>` : ''}
 
@@ -2673,9 +2775,10 @@ function renderCarteLiaisonAppli() {
         • Les tickets de l'appli comptent pour tous les services de leur journée, et à la clôture on rapproche tout ce qui a été encaissé depuis l'ouverture de la caisse.<br>
         • Ne sont pas repris : les repas employés (offerts), les commandes archivées sans paiement et les encaissements faits avant cette mise à jour (sans moyen de paiement).<br>
         • Un surplus de titres-restaurant / chèques-vacances non rendu est compté dans le ticket (comme sur le bordereau de remise).<br>
-        • Les tickets de l'appli ne se suppriment pas ici : pour corriger, corrige l'encaissement dans l'appli de commande.<br>
+        • Les tickets de l'appli ne se modifient pas ici. Pour corriger un moyen de paiement : appli de commande → Historique → toucher la table → « ✏️ Modifier le paiement » (code de modification). Le ticket est mis à jour ici automatiquement (mention « corrigé »). Hiboutik, lui, est à corriger à la main.<br>
         • À chaque ouverture de l'app, les encaissements des ${JOURS_RATTRAPAGE_APPLI} derniers jours sont vérifiés, pour rattraper ceux reçus pendant que l'app était fermée.<br>
-        • Le mot de passe n'est pas enregistré ; il faut activer la liaison une fois sur chaque appareil de comptage.
+        • Le mot de passe n'est pas enregistré ; il faut activer la liaison une fois sur chaque appareil de comptage.<br>
+        • <strong>Contrôle Z Hiboutik</strong> (à la clôture) : Z Hiboutik − tickets du cycle, moyen par moyen. Écart ≤ 0,50 € = juste ; jusqu'à ${formatMontant(State.seuilEcartAlerte)} = petit écart (orange) ; au-delà = écart important (rouge). Le seuil est celui de la carte « Seuil d'alerte écart » ci-dessous.
       </div>
     </div>`;
 }
@@ -3083,6 +3186,10 @@ const Export = {
         row["Relevé " + m.label + " (€)"] = c[m.champTheorique] === null || c[m.champTheorique] === undefined ? "" : c[m.champTheorique];
         row["Écart " + m.label + " (€)"] = c[m.champEcart] === null || c[m.champEcart] === undefined ? "" : c[m.champEcart];
       });
+      if (State.etablissement === 'moule') {
+        row["Z Hiboutik total (€)"] = c.totalZHiboutik === null || c.totalZHiboutik === undefined ? "" : c.totalZHiboutik;
+        row["Écart Hiboutik / appli (€)"] = c.ecartHiboutikTotal === null || c.ecartHiboutikTotal === undefined ? "" : c.ecartHiboutikTotal;
+      }
       row["Commentaire"] = c.commentaire || "";
       return row;
     });
@@ -3160,6 +3267,16 @@ const Export = {
         </tr>
       </table>`;
     }).join('');
+
+    const hibHtml = (c.ecartHiboutikTotal !== null && c.ecartHiboutikTotal !== undefined && c.zHiboutik) ? `
+      <div class="section-title">Contrôle Z Hiboutik</div>
+      <table class="pdf-table">
+        ${MODES_PAIEMENT.filter(m => (c.zHiboutik[m.cle] || 0) !== 0 || Math.abs((c.ecartsHiboutik || {})[m.cle] || 0) >= 0.01).map(m => `
+          <tr><td>${m.icone} ${m.label} — Z ${formatMontant(c.zHiboutik[m.cle] || 0)}</td><td style="text-align:right;">${formatMontantSigne((c.ecartsHiboutik || {})[m.cle] || 0)}</td></tr>`).join('')}
+        <tr style="font-weight:700; color:${statutEcart(c.ecartHiboutikTotal, State.seuilEcartAlerte)==='ok'?'#2d7d4f':'#b6402f'};">
+          <td>ÉCART HIBOUTIK / APPLI (Z ${formatMontant(c.totalZHiboutik || 0)})</td><td style="text-align:right;">${formatMontantSigne(c.ecartHiboutikTotal)}</td>
+        </tr>
+      </table>` : '';
 
     const commentaireHtml = c.commentaire ? `
       <div style="margin-top:16px; padding:12px; background:#f7f2ea; border-radius:8px; font-size:13px;">
@@ -3265,6 +3382,7 @@ const Export = {
 
         ${ecartHtml}
         ${ecartCBHtml}
+        ${hibHtml}
         ${ticketsHtml}
         ${commentaireHtml}
 
