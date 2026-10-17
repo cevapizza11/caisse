@@ -117,6 +117,8 @@ h1,h2,h3{
 .sync-dot.busy{background:#e0c97a;animation:pulse 1s infinite;}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 
+.topbar .build-tag{font-size:9.5px; color:#888; margin-top:2px; font-family:'Figtree',sans-serif;}
+
 /* ---------- MAIN CONTENT ---------- */
 #screen{
   flex:1;
@@ -177,7 +179,7 @@ label{
   display:block;
   margin-bottom:6px;
 }
-input[type=text], input[type=number], select, textarea{
+input[type=text], input[type=number], input[type=password], select, textarea{
   width:100%;
   padding:12px 13px;
   border:1.5px solid var(--border);
@@ -661,6 +663,7 @@ textarea{resize:vertical; min-height:60px;}
     <div>
       <h1>🦪 Comptage Caisse</h1>
       <div class="sub" id="topbarSub">Smoke &amp; Smile</div>
+      <div class="build-tag">v.17/10/2026 10:15</div>
     </div>
     <div style="display:flex; align-items:center; gap:8px;">
       <span class="sync-pill" id="syncPill"><span class="sync-dot off" id="syncDot"></span><span id="syncText">hors ligne</span></span>

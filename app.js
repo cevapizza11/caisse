@@ -31,6 +31,210 @@ try {
   firebaseReady = false;
 }
 
+const BUILD_VERSION = "v.17/10/2026 10:15";
+
+/* ================================================================
+   SECTION 1B — LIAISON AVEC L'APPLI DE COMMANDE MOULE & SMILE (17/10/2026)
+   À chaque « Encaissé ✓ » dans caisse.html (appli de commande), le mode de
+   paiement est enregistré dans l'historique du projet Firebase
+   « commandemoulesmile ». Ce module lit cet historique en direct et copie
+   chaque encaissement comme ticket dans l'onglet 🧾 Tickets — plus besoin
+   de retaper les tickets à la main.
+   - Connexion : une seule fois par appareil, dans Réglages, avec le mot de
+     passe équipe de la caisse (le mot de passe n'est PAS enregistré, seule
+     la session Firebase est gardée sur l'appareil).
+   - Lecture seule côté appli de commande : rien n'y est jamais modifié.
+   - Les tickets copiés ont un identifiant fixe (appli_<id>_<n>) : impossible
+     de les créer en double, même avec plusieurs appareils ouverts.
+   ================================================================ */
+const FIREBASE_MOULE_CONFIG = {
+  apiKey: "AIzaSyDUb3LtVsMAq986DgtHwkMBeQFr8A8A2nU",
+  authDomain: "commandemoulesmile.firebaseapp.com",
+  projectId: "commandemoulesmile",
+  storageBucket: "commandemoulesmile.firebasestorage.app",
+  messagingSenderId: "303564394584",
+  appId: "1:303564394584:web:cbde6960f99cac83517a2d"
+};
+const EMAIL_EQUIPE_MOULE = "mouleandsmile11@gmail.com";
+const SERVICE_APPLI = "📲 Appli de commande";
+const JOURS_RATTRAPAGE_APPLI = 3; // à l'ouverture, on récupère les encaissements des 3 derniers jours
+
+const LiaisonAppli = {
+  app: null, auth: null, dbMoule: null, user: null, unsub: null,
+  statut: 'inactif',   // 'inactif' (Smoke) | 'deconnecte' | 'demarrage' | 'ecoute' | 'erreur'
+  erreur: '',
+  idsConnus: new Set(), // tickets appli déjà copiés (évite toute réécriture inutile)
+  premierSnapshot: true,
+  dernierImport: null,
+
+  init() {
+    if (this.app) return true;
+    try {
+      this.app = firebase.apps.find(a => a.name === 'moule') || firebase.initializeApp(FIREBASE_MOULE_CONFIG, 'moule');
+      this.auth = this.app.auth();
+      this.dbMoule = this.app.firestore();
+      this.auth.onAuthStateChanged(u => {
+        this.user = (u && !u.isAnonymous) ? u : null;
+        this.majEcoute();
+      });
+      return true;
+    } catch (e) {
+      console.error("Liaison appli — initialisation impossible :", e);
+      this.statut = 'erreur';
+      this.erreur = "Initialisation impossible";
+      return false;
+    }
+  },
+
+  // À appeler après chaque connexion d'employé : n'écoute que pour Moule & Smile.
+  demarrer() {
+    if (State.etablissement !== 'moule' || !firebaseReady) {
+      this.stopEcoute();
+      this.statut = 'inactif';
+      return;
+    }
+    if (!this.init()) return;
+    this.majEcoute();
+  },
+
+  stopEcoute() {
+    if (this.unsub) { try { this.unsub(); } catch (e) {} this.unsub = null; }
+  },
+
+  async majEcoute() {
+    if (State.etablissement !== 'moule') { this.stopEcoute(); this.statut = 'inactif'; return; }
+    if (!this.user) {
+      this.stopEcoute();
+      this.statut = 'deconnecte';
+      rafraichirEcranSiPossible();
+      return;
+    }
+    if (this.unsub) return; // déjà en écoute
+    this.statut = 'demarrage';
+    this.premierSnapshot = true;
+    const depuisMs = Date.now() - JOURS_RATTRAPAGE_APPLI * 24 * 3600 * 1000;
+    // Liste des tickets appli déjà présents dans le comptage (pour ne rien réécrire)
+    try {
+      const snapConnus = await db.collection(TICKETS_COLLECTION).where('createdAt', '>=', depuisMs).get();
+      snapConnus.forEach(d => { if (d.id.startsWith('appli_')) this.idsConnus.add(d.id); });
+    } catch (e) { console.warn("Liaison appli — lecture des tickets déjà copiés impossible :", e); }
+    if (this.unsub || !this.user) return;
+    this.unsub = this.dbMoule.collection('historique')
+      .where('timestamp', '>=', firebase.firestore.Timestamp.fromMillis(depuisMs))
+      .onSnapshot(snap => this.traiterSnapshot(snap), err => {
+        console.error("Liaison appli — écoute refusée :", err);
+        this.stopEcoute();
+        this.statut = 'erreur';
+        this.erreur = err && err.code === 'permission-denied'
+          ? "Accès refusé par l'appli de commande (reconnecte la liaison dans Réglages)"
+          : "Connexion à l'appli de commande impossible";
+        rafraichirEcranSiPossible();
+      });
+  },
+
+  traiterSnapshot(snap) {
+    let nb = 0;
+    snap.docChanges().forEach(ch => {
+      if (ch.type === 'removed') return; // un « Vider l'historique » côté caisse ne supprime rien ici
+      nb += this.importer(ch.doc.id, ch.doc.data());
+    });
+    this.statut = 'ecoute';
+    this.erreur = '';
+    if (nb > 0) {
+      this.dernierImport = Date.now();
+      if (!this.premierSnapshot) toast("📲 " + nb + " ticket" + (nb > 1 ? "s" : "") + " reçu" + (nb > 1 ? "s" : "") + " de l'appli de commande");
+    }
+    this.premierSnapshot = false;
+    rafraichirEcranSiPossible();
+  },
+
+  // Copie un encaissement de l'appli en ticket(s) — un ticket par moyen de paiement.
+  // Ignorés : repas employés (offerts), commandes archivées sans paiement, anciens
+  // encaissements faits avant la mise à jour (aucun mode de paiement enregistré).
+  importer(idHisto, h) {
+    if (!h || !Array.isArray(h.paiements) || h.paiements.length === 0) return 0;
+    if (h.type === 'employe' || h.modePaiement === 'offert') return 0;
+    const ms = h.encaisseLeMs || (h.timestamp && h.timestamp.toMillis ? h.timestamp.toMillis() : null);
+    if (!ms) return 0;
+    let nb = 0;
+    h.paiements.forEach((p, i) => {
+      const montant = Math.round((parseFloat(p.montant) || 0) * 100) / 100;
+      if (montant <= 0 || !TOUS_MODES_PAIEMENT.find(m => m.cle === p.mode)) return;
+      const idTicket = 'appli_' + idHisto + '_' + i;
+      if (this.idsConnus.has(idTicket) || State.tickets.some(t => t.id === idTicket)) return;
+      const d = new Date(ms);
+      const payload = {
+        date: d.toISOString().slice(0, 10),
+        heure: d.toTimeString().slice(0, 5),
+        caisse: State.caisseTicketsAppli || State.caisses[0] || "Caisse 1",
+        service: SERVICE_APPLI,
+        mode: p.mode,
+        montant: montant,
+        employe: "Appli · " + (h.table != null ? "Table " + h.table : "?"),
+        etablissement: 'moule',
+        source: 'appli',
+        table: h.table != null ? h.table : null,
+        historiqueId: idHisto,
+        mixte: h.paiements.length > 1,
+        createdAt: ms
+      };
+      this.idsConnus.add(idTicket);
+      State.tickets.unshift({ id: idTicket, ...payload });
+      db.collection(TICKETS_COLLECTION).doc(idTicket).set(payload)
+        .catch(e => console.error("Liaison appli — copie du ticket impossible :", e));
+      nb++;
+    });
+    return nb;
+  },
+
+  async connecter() {
+    const champ = document.getElementById('liaisonPwd');
+    const pwd = champ ? champ.value : '';
+    if (!pwd) { toast("Entre le mot de passe équipe de la caisse Moule & Smile", true); return; }
+    if (!this.init()) { toast("Liaison impossible à initialiser", true); return; }
+    try {
+      await this.auth.signInWithEmailAndPassword(EMAIL_EQUIPE_MOULE, pwd);
+      toast("Liaison activée ✓ — les tickets de l'appli arrivent automatiquement");
+    } catch (e) {
+      console.error("Liaison appli — connexion refusée :", e);
+      toast("Mot de passe incorrect ou pas de connexion internet", true);
+    }
+    Render.screen();
+  },
+
+  async deconnecter() {
+    if (!confirm("Couper la liaison sur cet appareil ? Les tickets de l'appli n'arriveront plus ici jusqu'à la prochaine connexion.")) return;
+    try { await this.auth.signOut(); } catch (e) {}
+    this.stopEcoute();
+    this.statut = 'deconnecte';
+    Render.screen();
+  },
+
+  libelleStatut() {
+    switch (this.statut) {
+      case 'ecoute':     return "🟢 Liaison active — tickets reçus en direct";
+      case 'demarrage':  return "🟡 Connexion en cours…";
+      case 'deconnecte': return "🔴 Liaison non connectée sur cet appareil";
+      case 'erreur':     return "🔴 " + (this.erreur || "Erreur de liaison");
+      default:           return "⚪ Liaison inactive";
+    }
+  }
+};
+
+// Re-dessine l'écran quand des tickets arrivent, sans couper une saisie en cours.
+let _timerRafraichir = null;
+function rafraichirEcranSiPossible() {
+  if (!State.employeActif) return;
+  if (!['tickets', 'nouveau', 'reglages'].includes(State.currentScreen)) return;
+  const a = document.activeElement;
+  if (a && ['INPUT', 'TEXTAREA', 'SELECT'].includes(a.tagName)) {
+    clearTimeout(_timerRafraichir);
+    _timerRafraichir = setTimeout(rafraichirEcranSiPossible, 2500);
+    return;
+  }
+  Render.screen();
+}
+
 const COLLECTION = "comptages";
 const TICKETS_COLLECTION = "tickets";
 const PETITE_CAISSE_COLLECTION = "petiteCaisse";
@@ -215,7 +419,8 @@ const State = {
   statsDateDebut: null, // utilisé si statsPeriode === 'perso'
   statsDateFin: null,
   seuilAlertesRecurrentes: 2, // nb d'écarts jaunes+rouges déclenchant une alerte récurrence
-  delaiInactiviteMinutes: 15  // délai avant déconnexion auto (0 = désactivé)
+  delaiInactiviteMinutes: 15, // délai avant déconnexion auto (0 = désactivé)
+  caisseTicketsAppli: null    // caisse qui reçoit les tickets de l'appli de commande (null = 1re caisse)
 };
 
 const SESSION_KEY = 'caisseMarmiteEmployeActif';
@@ -322,7 +527,7 @@ function calculEcartMode(draft, modeCle) {
   const info = modeInfo(modeCle);
   const valeurRelevee = draft[info.champTheorique];
   if (valeurRelevee === null || valeurRelevee === undefined || valeurRelevee === "") return null;
-  const totalTickets = totauxTicketsPour(draft.caisse, draft.service, draft.date)[modeCle] || 0;
+  const totalTickets = totauxPourDraft(draft)[modeCle] || 0;
   return Math.round((parseFloat(valeurRelevee) - totalTickets) * 100) / 100;
 }
 // Alias conservé pour compatibilité avec le code existant
@@ -332,8 +537,38 @@ function calculEcartCB(draft) {
 
 // Agrège tous les tickets correspondant à une caisse/service/date donnés,
 // et retourne le total par mode de paiement.
+// Un ticket venant de l'appli de commande n'a pas de « service » : il compte
+// pour tous les services de sa caisse et de sa date.
+function ticketCorrespond(t, caisse, service, date) {
+  return t.caisse === caisse && t.date === date && (t.source === 'appli' || t.service === service);
+}
+
 function totauxTicketsPour(caisse, service, date) {
-  const tickets = State.tickets.filter(t => t.caisse === caisse && t.service === service && t.date === date);
+  return totauxDeTickets(State.tickets.filter(t => ticketCorrespond(t, caisse, service, date)));
+}
+
+// Ouverture à laquelle se rattache une clôture (en cours de saisie ou déjà enregistrée).
+function ouvertureDeReferencePour(d) {
+  if (!d || d.type !== 'cloture') return null;
+  if (!d.id) return caisseADejaOuvertureActive(d.caisse);
+  return State.comptages
+    .filter(x => x.type === 'fond' && normaliserNomCaisse(x.caisse) === normaliserNomCaisse(d.caisse) && (x.createdAt || 0) <= (d.createdAt || 0))
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))[0] || null;
+}
+
+// Totaux des tickets à rapprocher pour un comptage de clôture : tous les tickets
+// entre l'ouverture de la caisse et maintenant (même logique que la feuille de
+// caisse imprimée). Sans ouverture trouvée : ancien calcul par caisse/service/date.
+function totauxPourDraft(d) {
+  const ouv = ouvertureDeReferencePour(d);
+  if (!ouv) return totauxTicketsPour(d.caisse, d.service, d.date);
+  const fin = d.id ? (d.createdAt || Date.now()) : Date.now();
+  const res = totauxDeTickets(ticketsEntreOuvertureEtCloture(d.caisse, ouv.createdAt || 0, fin));
+  res.depuisOuverture = ouv;
+  return res;
+}
+
+function totauxDeTickets(tickets) {
   const parMode = {};
   let total = 0;
   MODES_PAIEMENT.forEach(m => {
@@ -346,7 +581,8 @@ function totauxTicketsPour(caisse, service, date) {
     especes: parMode.especes,   // alias explicites conservés pour rétrocompatibilité du code existant
     cb: parMode.cb,
     total: Math.round(total * 100) / 100,
-    nbTickets: tickets.length
+    nbTickets: tickets.length,
+    nbAppli: tickets.filter(t => t.source === 'appli').length
   };
 }
 
@@ -637,6 +873,7 @@ const Auth = {
         });
         Render.screen();
         FileAttente.tenterSynchronisation();
+        LiaisonAppli.demarrer(); // écoute l'appli de commande (Moule & Smile uniquement)
       })();
     } else {
       toast("Code incorrect", true);
@@ -1065,6 +1302,7 @@ const Sync = {
         if (data.seuilEcartAlerte !== undefined) State.seuilEcartAlerte = data.seuilEcartAlerte;
         if (data.montantCibleFondCaisse !== undefined) State.montantCibleFondCaisse = data.montantCibleFondCaisse;
         if (data.delaiInactiviteMinutes !== undefined) State.delaiInactiviteMinutes = data.delaiInactiviteMinutes;
+        if (data.caisseTicketsAppli) State.caisseTicketsAppli = data.caisseTicketsAppli;
       }
     } catch (e) {
       console.error("Erreur chargement config :", e);
@@ -1120,7 +1358,8 @@ const Sync = {
         services: State.services,
         seuilEcartAlerte: State.seuilEcartAlerte,
         montantCibleFondCaisse: State.montantCibleFondCaisse,
-        delaiInactiviteMinutes: State.delaiInactiviteMinutes
+        delaiInactiviteMinutes: State.delaiInactiviteMinutes,
+        caisseTicketsAppli: State.caisseTicketsAppli || null
       });
       toast("Réglages enregistrés");
     } catch (e) {
@@ -1160,7 +1399,7 @@ function renderDenomRow(denom, prefix, isPiece) {
 function renderEcranNouveau() {
   const d = State.draft;
   const total = calculTotalDraft(d);
-  const totauxTickets = totauxTicketsPour(d.caisse, d.service, d.date);
+  const totauxTickets = totauxPourDraft(d);
   const ouvertureActive = d.type === 'fond' ? caisseADejaOuvertureActive(d.caisse, d.id) : null;
   const ouvertureBloquee = !!ouvertureActive && !d.forcerOuverture;
 
@@ -1251,7 +1490,8 @@ function renderEcranNouveau() {
 
     ${d.type === 'cloture' ? `
     <div class="card">
-      <div class="card-title">Tickets saisis pour ce service</div>
+      <div class="card-title">${totauxTickets.depuisOuverture ? 'Tickets depuis l\'ouverture (' + (totauxTickets.depuisOuverture.heure || '') + ')' : 'Tickets saisis pour ce service'}</div>
+      ${State.etablissement === 'moule' ? `<div class="helper-text" style="margin-top:-6px;">${LiaisonAppli.libelleStatut()}${totauxTickets.nbAppli ? ' · dont ' + totauxTickets.nbAppli + ' ticket' + (totauxTickets.nbAppli > 1 ? 's' : '') + ' de l\'appli' : ''}</div>` : ''}
       ${totauxTickets.nbTickets === 0 ? `
         <div class="helper-text" style="margin-bottom:0;">Aucun ticket saisi pour cette caisse/service/date. Va dans l'onglet 🧾 Tickets pour les enregistrer au fur et à mesure du service, ou saisis le CA théorique manuellement ci-dessous.</div>
       ` : `
@@ -1458,7 +1698,7 @@ const Draft = {
     // automatique issue des tickets au moment de l'enregistrement, pour que
     // l'historique reflète exactement l'écart qui était affiché à l'écran.
     if ((d.caTheorique === null || d.caTheorique === undefined || d.caTheorique === "") && d.type === 'cloture') {
-      const totauxTickets = totauxTicketsPour(d.caisse, d.service, d.date);
+      const totauxTickets = totauxPourDraft(d);
       if (totauxTickets.nbTickets > 0) d.caTheorique = totauxTickets.especes;
     }
     // Capture si c'est la création d'une NOUVELLE clôture (pas une édition),
@@ -1527,7 +1767,7 @@ function renderEcranTickets() {
   const ctx = State.ticketContexte;
   const totaux = totauxTicketsPour(ctx.caisse, ctx.service, ctx.date);
   const ticketsJour = State.tickets
-    .filter(t => t.caisse === ctx.caisse && t.service === ctx.service && t.date === ctx.date)
+    .filter(t => ticketCorrespond(t, ctx.caisse, ctx.service, ctx.date))
     .sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
 
   const optionsCaisses = State.caisses.map(c => `<option value="${c}" ${c===ctx.caisse?'selected':''}>${c}</option>`).join('');
@@ -1551,7 +1791,10 @@ function renderEcranTickets() {
       // La suppression est réservée aux admins, SAUF pour un ticket encore en
       // file d'attente locale (pas encore synchronisé) : l'employé doit
       // pouvoir corriger sa propre saisie tant qu'elle n'est pas confirmée.
-      const peutSupprimer = estAdmin() || t._enAttente;
+      // Les tickets venant de l'appli de commande ne se suppriment pas ici : ils seraient
+      // recopiés aussitôt. Pour corriger, on corrige l'encaissement dans l'appli de commande.
+      const estAppli = t.source === 'appli';
+      const peutSupprimer = !estAppli && (estAdmin() || t._enAttente);
       const boutonSupprimer = peutSupprimer
         ? `<button class="btn-icon" style="background:var(--ivoire-dark); color:var(--ecart-bad);" onclick="Tickets.supprimer('${t.id}')">✕</button>`
         : '';
@@ -1559,12 +1802,13 @@ function renderEcranTickets() {
       <div class="hist-item" style="cursor:default; ${t._enAttente ? 'border-color:var(--ecart-warn); border-style:dashed;' : ''}">
         <div class="hist-main">
           <div class="hist-titre">${info.icone} ${info.label}</div>
-          <div class="hist-meta">${t.heure || ''}${t.employe ? ' · ' + t.employe : ''}</div>
+          <div class="hist-meta">${t.heure || ''}${t.employe ? ' · ' + t.employe : ''}${t.mixte ? ' · paiement mixte' : ''}</div>
         </div>
         <div class="hist-right" style="display:flex; align-items:center; gap:10px;">
           <div>
             <div class="hist-montant">${formatMontant(t.montant)}</div>
             ${badgeAttente}
+            ${estAppli ? `<span class="hist-badge ok">📲 appli</span>` : ''}
           </div>
           ${boutonSupprimer}
         </div>
@@ -1587,6 +1831,16 @@ function renderEcranTickets() {
       <label>Date</label>
       <input type="text" value="${formatDate(ctx.date)}" readonly onclick="Tickets.openDatePicker()" style="background:#fafaf7;">
     </div>
+
+    ${State.etablissement === 'moule' ? `
+    <div class="ecart-box ${LiaisonAppli.statut === 'ecoute' ? 'ok' : (LiaisonAppli.statut === 'demarrage' ? 'warn' : 'bad')}" style="display:block;">
+      <div class="lbl" style="line-height:1.4;">${LiaisonAppli.libelleStatut()}</div>
+      <div style="font-size:12px; margin-top:4px; color:var(--ink-soft); line-height:1.4;">
+        ${LiaisonAppli.statut === 'ecoute'
+          ? "Chaque « Encaissé ✓ » de l'appli de commande arrive ici tout seul, sur la caisse <strong>" + (State.caisseTicketsAppli || State.caisses[0]) + "</strong>. Utilise le pavé ci-dessous seulement pour une vente faite hors appli."
+          : "Les tickets de l'appli de commande n'arrivent pas sur cet appareil. " + (estAdmin() ? "Active la liaison dans ⚙️ Réglages." : "Demande à un administrateur d'activer la liaison dans Réglages.")}
+      </div>
+    </div>` : ''}
 
     <div class="card" style="text-align:center;">
       <div class="card-title" style="justify-content:center;">Montant du ticket</div>
@@ -2395,6 +2649,37 @@ function renderListeEmployes() {
   `).join('');
 }
 
+function renderCarteLiaisonAppli() {
+  const connecte = !!LiaisonAppli.user;
+  const caisseCible = State.caisseTicketsAppli || State.caisses[0];
+  const options = State.caisses.map(c => `<option value="${c}" ${c === caisseCible ? 'selected' : ''}>${c}</option>`).join('');
+  return `
+    <div class="card" style="border-color:var(--teal-light);">
+      <div class="card-title">🔗 Liaison avec l'appli de commande</div>
+      <div class="helper-text" style="margin-top:-4px; font-weight:700;">${LiaisonAppli.libelleStatut()}</div>
+      ${connecte ? `
+        <div class="helper-text">Connecté avec le compte équipe de la caisse sur cet appareil.</div>
+        <button class="btn btn-danger" style="width:100%; margin-bottom:14px;" onclick="LiaisonAppli.deconnecter()">Couper la liaison sur cet appareil</button>
+      ` : `
+        <label>Mot de passe équipe de la caisse Moule &amp; Smile</label>
+        <input type="password" id="liaisonPwd" autocomplete="off" placeholder="Le même que sur caisse.html">
+        <button class="btn btn-primary" style="margin-bottom:14px;" onclick="LiaisonAppli.connecter()">🔗 Activer la liaison sur cet appareil</button>
+      `}
+      <label>Caisse qui reçoit les tickets de l'appli</label>
+      <select onchange="Reglages.setCaisseTicketsAppli(this.value)">${options}</select>
+      <div class="helper-text" style="margin-bottom:0; line-height:1.5;">
+        <strong>Règles de la liaison :</strong><br>
+        • Chaque « Encaissé ✓ » de l'appli devient un ticket ici, avec son moyen de paiement (espèces, CB, titre-restaurant, chèque-vacances, chèque). Un paiement mixte donne un ticket par moyen.<br>
+        • Les tickets de l'appli comptent pour tous les services de leur journée, et à la clôture on rapproche tout ce qui a été encaissé depuis l'ouverture de la caisse.<br>
+        • Ne sont pas repris : les repas employés (offerts), les commandes archivées sans paiement et les encaissements faits avant cette mise à jour (sans moyen de paiement).<br>
+        • Un surplus de titres-restaurant / chèques-vacances non rendu est compté dans le ticket (comme sur le bordereau de remise).<br>
+        • Les tickets de l'appli ne se suppriment pas ici : pour corriger, corrige l'encaissement dans l'appli de commande.<br>
+        • À chaque ouverture de l'app, les encaissements des ${JOURS_RATTRAPAGE_APPLI} derniers jours sont vérifiés, pour rattraper ceux reçus pendant que l'app était fermée.<br>
+        • Le mot de passe n'est pas enregistré ; il faut activer la liaison une fois sur chaque appareil de comptage.
+      </div>
+    </div>`;
+}
+
 function renderEcranReglages() {
   return `
     <div class="card">
@@ -2410,6 +2695,8 @@ function renderEcranReglages() {
       ${estAdmin() && !estSuperAdmin() ? `<div class="helper-text" style="margin-top:8px;">⭐ Seul le super-administrateur peut supprimer des employés et modifier les PINs existants.</div>` : ''}
       <div class="helper-text" style="margin-top:8px; margin-bottom:0;">Le code PIN doit faire 4 chiffres. Chaque comptage enregistré est associé à l'employé connecté.</div>
     </div>
+
+    ${State.etablissement === 'moule' ? renderCarteLiaisonAppli() : ''}
 
     <div class="card">
       <div class="card-title">Caisses / postes</div>
@@ -2454,7 +2741,7 @@ function renderEcranReglages() {
       <div style="font-size:13px; color:var(--ink-soft); line-height:1.6;">
         Comptage Caisse — Smoke & Smile<br>
         Données synchronisées via Firebase<br>
-        <span id="versionTag">v1.0</span>
+        <span id="versionTag">${BUILD_VERSION}</span>
       </div>
     </div>
   `;
@@ -2491,6 +2778,12 @@ const Reglages = {
     const v = parseFloat(value);
     State.montantCibleFondCaisse = isNaN(v) ? 0 : Math.max(0, v);
     Sync.sauvegarderConfig();
+  },
+
+  setCaisseTicketsAppli(value) {
+    State.caisseTicketsAppli = value;
+    Sync.sauvegarderConfig();
+    Render.screen();
   },
 
   setDelaiInactivite(value) {
@@ -2894,7 +3187,7 @@ const Export = {
     const ticketsTries = ouvertureAssociee
       ? ticketsEntreOuvertureEtCloture(c.caisse, ouvertureAssociee.createdAt || 0, c.createdAt || Date.now())
       : State.tickets
-          .filter(t => t.caisse === c.caisse && t.service === c.service && t.date === c.date)
+          .filter(t => ticketCorrespond(t, c.caisse, c.service, c.date))
           .sort((a,b) => (a.createdAt||0) - (b.createdAt||0));
 
     const totauxParModeCycle = {};
@@ -3180,6 +3473,7 @@ async function initApp() {
     State.draft = nouveauDraft();
     Nav.updateActiveTab(State.currentScreen);
     Render.screen();
+    LiaisonAppli.demarrer(); // écoute l'appli de commande (Moule & Smile uniquement)
   } else {
     Nav.updateActiveTab(State.currentScreen);
   }
