@@ -1,5 +1,5 @@
 /* ================================================================
-   COMPTAGE CAISSE — LA MARMITE BLEUE
+   COMPTAGE CAISSE — SMOKE & SMILE (appli séparée de Moule & Smile le 22/10/2026)
    Fichier unique app.js — sections numérotées pour patchs ciblés
    ================================================================ */
 
@@ -31,7 +31,7 @@ try {
   firebaseReady = false;
 }
 
-const BUILD_VERSION = "v.17/10/2026 10:50";
+const BUILD_VERSION = "v.22/10/2026 11:30";
 
 /* ================================================================
    SECTION 1B — LIAISON AVEC L'APPLI DE COMMANDE MOULE & SMILE (17/10/2026)
@@ -420,7 +420,7 @@ function uid() {
    ================================================================ */
 const State = {
   currentScreen: 'nouveau',
-  etablissement: 'smoke',  // établissement actuellement actif : 'smoke' | 'moule'
+  etablissement: 'smoke',  // appli d'un seul établissement (22/10/2026) — : 'smoke' | 'moule'
   caisses: ["Caisse 1", "Caisse 2", "Bar"],
   services: ["Service midi", "Service soir", "Journée complète"],
   employes: [],         // [{nom, pin}] chargés depuis Firestore
@@ -838,7 +838,7 @@ const Auth = {
       const nom = localStorage.getItem(SESSION_KEY);
       if (nom && State.employes.find(e => e.nom === nom)) {
         State.employeActif = { nom };
-        const etab = localStorage.getItem('caisseMarmiteEtablissement') || 'smoke';
+        const etab = 'smoke';
         State.etablissement = etab;
         appliquerTheme(etab);
         Minuteur.relancer(); // relance le minuteur pour la session restaurée
@@ -893,7 +893,7 @@ const Auth = {
     if (emp && emp.pin === this.pinSaisi) {
       State.employeActif = { nom: emp.nom };
       // Applique l'établissement de l'employé et le thème visuel correspondant
-      State.etablissement = emp.etablissement || 'smoke';
+      State.etablissement = 'smoke'; // appli d'un seul établissement
       appliquerTheme(State.etablissement);
       try {
         localStorage.setItem(SESSION_KEY, emp.nom);
@@ -963,7 +963,7 @@ const Auth = {
     }
 
     if (!this.employeChoisi) {
-      const boutons = State.employes.map(e => `
+      const boutons = State.employes.filter(e => (e.etablissement || 'smoke') === 'smoke').map(e => `
         <button class="login-employe-btn" onclick="Auth.choisirEmploye('${e.nom.replace(/'/g,"\\'")}')">${e.nom}</button>
       `).join('');
       el.innerHTML = `
@@ -2743,8 +2743,7 @@ function renderListeEmployes() {
       <div class="denom-row" style="padding:0;">
         <span class="helper-text" style="margin-bottom:0; flex:1;">Établissement :</span>
         <select style="margin-bottom:0; flex:2;" onchange="Reglages.modifierEmploye(${i}, 'etablissement', this.value)">
-          <option value="smoke" ${(e.etablissement||'smoke')==='smoke' ? 'selected' : ''}>🟢 Smoke &amp; Smile</option>
-          <option value="moule" ${(e.etablissement||'smoke')==='moule' ? 'selected' : ''}>✨ Moule &amp; Smile</option>
+          <option value="smoke" selected>🟢 Smoke &amp; Smile</option>
         </select>
       </div>
     </div>
@@ -3549,7 +3548,7 @@ async function initApp() {
   // Applique le thème sauvegardé dès que possible (avant même le chargement
   // des données) pour éviter un flash de la couleur par défaut.
   try {
-    const etabSauvegarde = localStorage.getItem('caisseMarmiteEtablissement') || 'smoke';
+    const etabSauvegarde = 'smoke';
     State.etablissement = etabSauvegarde;
     appliquerTheme(etabSauvegarde);
   } catch(e) {}
@@ -3624,8 +3623,64 @@ async function initApp() {
   }
 }
 
+// (démarrage déplacé en fin de fichier : uniquement après activation de l'appareil)
+
+/* ================================================================
+   SÉCURITÉ (22/10/2026) — ACTIVATION DE L'APPAREIL
+   Les règles Firestore n'autorisent que le compte ci-dessous : sans lui,
+   personne ne peut lire ni modifier les comptages, tickets et codes PIN,
+   même en connaissant l'adresse de la base. À faire UNE fois par appareil.
+   ================================================================ */
+const EMAIL_ACTIVATION = "tmjumeaux@gmail.com";
+function ecranActivation(visible) {
+  let el = document.getElementById('ecranActivation');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'ecranActivation';
+    el.style.cssText = 'position:fixed;inset:0;z-index:99999;background:#111;color:#fff;display:none;align-items:center;justify-content:center;padding:24px;font-family:Figtree,system-ui,sans-serif';
+    el.innerHTML = `
+      <div style="width:100%;max-width:380px;text-align:center">
+        <div style="font-size:44px;margin-bottom:8px">🔒</div>
+        <div style="font-weight:800;font-size:22px">Activer cet appareil</div>
+        <div style="font-size:13px;color:#ccc;margin:10px 0 18px;line-height:1.5">Comptage caisse — Smoke &amp; Smile<br>Pour protéger la caisse, seuls les appareils activés par le gérant peuvent ouvrir l'app. À faire une seule fois.</div>
+        <input id="activationPwd" type="password" autocomplete="current-password" placeholder="Mot de passe du compte gérant" style="width:100%;box-sizing:border-box;padding:14px;border-radius:12px;border:1px solid #28a745;background:#1c1c1c;color:#fff;font-size:16px">
+        <button id="activationBtn" style="width:100%;margin-top:12px;padding:14px;border:none;border-radius:12px;background:#28a745;color:#fff;font-weight:700;font-size:16px;cursor:pointer">🔓 Activer</button>
+        <div id="activationErr" style="color:#ff8a80;font-size:13px;min-height:18px;margin-top:10px"></div>
+        <button id="activationOubli" type="button" style="background:none;border:none;color:#ccc;text-decoration:underline;font-size:13px;cursor:pointer">Mot de passe oublié ?</button>
+        <div style="font-size:11px;color:#777;margin-top:14px">${BUILD_VERSION}</div>
+      </div>`;
+    document.body.appendChild(el);
+    const err = () => document.getElementById('activationErr');
+    const activer = async () => {
+      const pwd = document.getElementById('activationPwd').value;
+      err().style.color = '#ff8a80'; err().textContent = '';
+      if (!pwd) { err().textContent = 'Entrez le mot de passe'; return; }
+      try { await firebase.auth().signInWithEmailAndPassword(EMAIL_ACTIVATION, pwd); document.getElementById('activationPwd').value = ''; }
+      catch (e) {
+        console.error(e);
+        err().textContent = e.code === 'auth/too-many-requests' ? "Trop d'essais — réessayez dans quelques minutes"
+          : e.code === 'auth/network-request-failed' ? 'Pas de connexion internet' : '❌ Mot de passe incorrect';
+      }
+    };
+    document.getElementById('activationBtn').addEventListener('click', activer);
+    document.getElementById('activationPwd').addEventListener('keydown', e => { if (e.key === 'Enter') activer(); });
+    document.getElementById('activationOubli').addEventListener('click', async () => {
+      try { await firebase.auth().sendPasswordResetEmail(EMAIL_ACTIVATION); err().style.color = '#8fd19e'; err().textContent = '📧 E-mail de réinitialisation envoyé au gérant'; }
+      catch (e) { err().style.color = '#ff8a80'; err().textContent = 'Envoi impossible — réessayez plus tard'; }
+    });
+  }
+  el.style.display = visible ? 'flex' : 'none';
+}
+let appDemarree = false;
+function demarrerApresActivation() {
+  firebase.auth().onAuthStateChanged(user => {
+    const ok = !!(user && !user.isAnonymous && user.email === EMAIL_ACTIVATION);
+    ecranActivation(!ok);
+    if (ok && !appDemarree) { appDemarree = true; initApp(); }
+  });
+}
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', initApp);
+  document.addEventListener('DOMContentLoaded', demarrerApresActivation);
 } else {
-  initApp();
+  demarrerApresActivation();
 }
